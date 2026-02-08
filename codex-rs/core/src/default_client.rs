@@ -200,6 +200,13 @@ pub fn build_reqwest_client() -> reqwest::Client {
         builder = builder.no_proxy();
     }
 
+    // Attempt to use our custom resolver that handles Termux/Android.
+    // If it initializes successfully (which it should, falling back to Google DNS if needed),
+    // use it. Otherwise, default to standard reqwest behavior.
+    if let Ok(resolver) = crate::dns_fallback::TermuxResolver::new() {
+        builder = builder.dns_resolver(std::sync::Arc::new(resolver));
+    }
+
     builder.build().unwrap_or_else(|_| reqwest::Client::new())
 }
 

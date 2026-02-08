@@ -64,7 +64,8 @@ os_info = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 regex-lite = { workspace = true }
-reqwest = { workspace = true, features = ["json", "stream"] }
+reqwest = { workspace = true, features = ["json", "stream", "hickory-dns"] }
+hickory-resolver = "0.25.2"
 rmcp = { workspace = true, default-features = false, features = [
     "base64",
     "macros",

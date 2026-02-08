@@ -90,6 +90,7 @@ pub type CodexConversation = CodexThread;
 pub use auth::AuthManager;
 pub use auth::CodexAuth;
 pub mod default_client;
+pub mod dns_fallback;
 pub mod project_doc;
 mod rollout;
 pub(crate) mod safety;
