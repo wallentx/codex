@@ -10,6 +10,7 @@ on:
   push:
     tags:
       - "rust-v*.*.*"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}
@@ -17,6 +18,7 @@ concurrency:
 
 jobs:
   tag-check:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -46,6 +48,7 @@ jobs:
           echo "::endgroup::"
 
   build:
+    if: always() && (needs.tag-check.result == 'success' || needs.tag-check.result == 'skipped')
     needs: tag-check
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
@@ -126,15 +129,19 @@ jobs:
           # Set up the Android toolchain
           toolchain="${ndk}/toolchains/llvm/prebuilt/linux-x86_64"
 
+          # Use API level 21 for maximum Termux compatibility
+          # (supports Android 5.0+ / Termux on older devices)
+          api_level="21"
+
           # Configure Cargo to use the NDK linker
           cargo_target_var="CARGO_TARGET_${target^^}_LINKER"
           cargo_target_var="${cargo_target_var//-/_}"
-          echo "${cargo_target_var}=${toolchain}/bin/aarch64-linux-android34-clang" >> "$GITHUB_ENV"
+          echo "${cargo_target_var}=${toolchain}/bin/aarch64-linux-android${api_level}-clang" >> "$GITHUB_ENV"
 
           # Set CC and AR for the target
           target_cc_var="CC_${target}"
           target_cc_var="${target_cc_var//-/_}"
-          echo "${target_cc_var}=${toolchain}/bin/aarch64-linux-android34-clang" >> "$GITHUB_ENV"
+          echo "${target_cc_var}=${toolchain}/bin/aarch64-linux-android${api_level}-clang" >> "$GITHUB_ENV"
 
           target_ar_var="AR_${target}"
           target_ar_var="${target_ar_var//-/_}"
@@ -452,6 +459,7 @@ jobs:
             codex-rs/dist/${{ matrix.target }}/*
 
   shell-tool-mcp:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     name: shell-tool-mcp
     needs: tag-check
     uses: ./.github/workflows/shell-tool-mcp.yml
@@ -461,6 +469,7 @@ jobs:
     secrets: inherit
 
   release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs:
       - build
       - shell-tool-mcp
