@@ -111,12 +111,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # OpenAI internal runners (paid macOS xlarge runners)
           - runner: macos-15-xlarge
             target: aarch64-apple-darwin
             profile: dev
+            openai_only: true
           - runner: macos-15-xlarge
             target: x86_64-apple-darwin
             profile: dev
+            openai_only: true
+          # Fork-friendly macOS runners
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            profile: dev
+            fork_only: true
           # OpenAI internal runners (with runner groups)
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
@@ -178,9 +186,16 @@ jobs:
           # there could be release-only build errors we want to catch.
           # Hopefully this also pre-populates the build cache to speed up
           # releases.
+          # OpenAI internal release runners (paid macOS xlarge)
           - runner: macos-15-xlarge
             target: aarch64-apple-darwin
             profile: release
+            openai_only: true
+          # Fork-friendly release runners
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            profile: release
+            fork_only: true
           # OpenAI internal release runners
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
@@ -520,9 +535,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # OpenAI internal runners (paid macOS xlarge runners)
           - runner: macos-15-xlarge
             target: aarch64-apple-darwin
             profile: dev
+            openai_only: true
+          # Fork-friendly macOS runners
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            profile: dev
+            fork_only: true
           # OpenAI internal runners (with runner groups)
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu

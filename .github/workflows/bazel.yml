@@ -17,25 +17,41 @@ concurrency:
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 jobs:
   test:
+    # Skip paid runners on forks
+    if: |
+      (matrix.openai_only != true || github.repository_owner == 'openai') &&
+      (matrix.fork_only != true || github.repository_owner != 'openai')
     strategy:
       fail-fast: false
       matrix:
         include:
-          # macOS
+          # macOS (OpenAI internal - paid xlarge runners)
           - os: macos-15-xlarge
             target: aarch64-apple-darwin
+            openai_only: true
           - os: macos-15-xlarge
             target: x86_64-apple-darwin
+            openai_only: true
+          # macOS (fork-friendly)
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            fork_only: true
 
-          # Linux
+          # Linux (OpenAI internal - paid arm runners)
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            openai_only: true
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            openai_only: true
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
+          # Linux (fork-friendly)
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-gnu
+            fork_only: true
           # TODO: Enable Windows once we fix the toolchain issues there.
           #- os: windows-latest
           #  target: x86_64-pc-windows-gnullvm
