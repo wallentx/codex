@@ -67,13 +67,65 @@ jobs:
           echo "npm_tag=${npm_tag}" >> "$GITHUB_OUTPUT"
           echo "should_publish=${should_publish}" >> "$GITHUB_OUTPUT"
 
+  matrix-setup:
+    runs-on: ubuntu-latest
+    outputs:
+      rust-binaries: ${{ steps.compute.outputs.rust-binaries }}
+      bash-linux: ${{ steps.compute.outputs.bash-linux }}
+      bash-darwin: ${{ steps.compute.outputs.bash-darwin }}
+    steps:
+      - name: Compute matrices
+        id: compute
+        shell: bash
+        run: |
+          set -euo pipefail
+          is_openai="${{ github.repository_owner == 'openai' }}"
+
+          # rust-binaries: always include x86_64-musl; conditionally include paid/fork runners
+          if [[ "$is_openai" == "true" ]]; then
+            rust='[
+              {"runner":"macos-15-xlarge","target":"aarch64-apple-darwin"},
+              {"runner":"macos-15-xlarge","target":"x86_64-apple-darwin"},
+              {"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","install_musl":true}
+            ]'
+          else
+            rust='[{"runner":"macos-latest","target":"aarch64-apple-darwin"}]'
+          fi
+          rust=$(echo "$rust" | jq -c '. + [{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","install_musl":true}]')
+          echo "rust-binaries={\"include\":$rust}" >> "$GITHUB_OUTPUT"
+
+          # bash-linux: always include x86_64 variants; add arm64 on openai
+          bash_linux='[
+            {"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","variant":"ubuntu-24.04","image":"ubuntu:24.04"},
+            {"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","variant":"ubuntu-22.04","image":"ubuntu:22.04"},
+            {"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","variant":"debian-12","image":"debian:12"},
+            {"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","variant":"debian-11","image":"debian:11"},
+            {"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","variant":"centos-9","image":"quay.io/centos/centos:stream9"}
+          ]'
+          if [[ "$is_openai" == "true" ]]; then
+            bash_linux=$(echo "$bash_linux" | jq -c '. + [
+              {"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","variant":"ubuntu-24.04","image":"arm64v8/ubuntu:24.04"},
+              {"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","variant":"ubuntu-22.04","image":"arm64v8/ubuntu:22.04"},
+              {"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","variant":"ubuntu-20.04","image":"arm64v8/ubuntu:20.04"},
+              {"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","variant":"debian-12","image":"arm64v8/debian:12"},
+              {"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","variant":"debian-11","image":"arm64v8/debian:11"},
+              {"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","variant":"centos-9","image":"quay.io/centos/centos:stream9"}
+            ]')
+          fi
+          echo "bash-linux={\"include\":$(echo "$bash_linux" | jq -c)}" >> "$GITHUB_OUTPUT"
+
+          # bash-darwin: always include macos-14; add macos-15-xlarge on openai
+          bash_darwin='[{"runner":"macos-14","target":"aarch64-apple-darwin","variant":"macos-14"}]'
+          if [[ "$is_openai" == "true" ]]; then
+            bash_darwin=$(echo "$bash_darwin" | jq -c '. + [
+              {"runner":"macos-15-xlarge","target":"aarch64-apple-darwin","variant":"macos-15"}
+            ]')
+          fi
+          echo "bash-darwin={\"include\":$(echo "$bash_darwin" | jq -c)}" >> "$GITHUB_OUTPUT"
+
   rust-binaries:
     name: Build Rust - ${{ matrix.target }}
-    needs: metadata
-    # Skip paid runners on forks (though this workflow is typically only called from releases)
-    if: |
-      (matrix.openai_only != true || github.repository_owner == 'openai') &&
-      (matrix.fork_only != true || github.repository_owner != 'openai')
+    needs: [metadata, matrix-setup]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     defaults:
@@ -81,26 +133,7 @@ jobs:
         working-directory: codex-rs
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # OpenAI internal runners (paid)
-          - runner: macos-15-xlarge
-            target: aarch64-apple-darwin
-            openai_only: true
-          - runner: macos-15-xlarge
-            target: x86_64-apple-darwin
-            openai_only: true
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            install_musl: true
-            openai_only: true
-          # Fork-friendly runners
-          - runner: macos-latest
-            target: aarch64-apple-darwin
-            fork_only: true
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            install_musl: true
+      matrix: ${{ fromJSON(needs.matrix-setup.outputs.rust-binaries) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -201,70 +234,14 @@ jobs:
 
   bash-linux:
     name: Build Bash (Linux) - ${{ matrix.variant }} - ${{ matrix.target }}
-    needs: metadata
-    # Skip paid runners on forks
-    if: |
-      (matrix.openai_only != true || github.repository_owner == 'openai') &&
-      (matrix.fork_only != true || github.repository_owner != 'openai')
+    needs: [metadata, matrix-setup]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     container:
       image: ${{ matrix.image }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            variant: ubuntu-24.04
-            image: ubuntu:24.04
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            variant: ubuntu-22.04
-            image: ubuntu:22.04
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            variant: debian-12
-            image: debian:12
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            variant: debian-11
-            image: debian:11
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            variant: centos-9
-            image: quay.io/centos/centos:stream9
-          # OpenAI internal runners (paid arm runners)
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            variant: ubuntu-24.04
-            image: arm64v8/ubuntu:24.04
-            openai_only: true
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            variant: ubuntu-22.04
-            image: arm64v8/ubuntu:22.04
-            openai_only: true
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            variant: ubuntu-20.04
-            image: arm64v8/ubuntu:20.04
-            openai_only: true
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            variant: debian-12
-            image: arm64v8/debian:12
-            openai_only: true
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            variant: debian-11
-            image: arm64v8/debian:11
-            openai_only: true
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            variant: centos-9
-            image: quay.io/centos/centos:stream9
-            openai_only: true
+      matrix: ${{ fromJSON(needs.matrix-setup.outputs.bash-linux) }}
     steps:
       - name: Install build prerequisites
         shell: bash
@@ -310,26 +287,12 @@ jobs:
 
   bash-darwin:
     name: Build Bash (macOS) - ${{ matrix.variant }} - ${{ matrix.target }}
-    needs: metadata
-    # Skip paid runners on forks
-    if: |
-      (matrix.openai_only != true || github.repository_owner == 'openai') &&
-      (matrix.fork_only != true || github.repository_owner != 'openai')
+    needs: [metadata, matrix-setup]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # OpenAI internal runners (paid xlarge)
-          - runner: macos-15-xlarge
-            target: aarch64-apple-darwin
-            variant: macos-15
-            openai_only: true
-          # Fork-friendly runners
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            variant: macos-14
+      matrix: ${{ fromJSON(needs.matrix-setup.outputs.bash-darwin) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
