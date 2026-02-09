@@ -129,15 +129,19 @@ jobs:
           # Set up the Android toolchain
           toolchain="${ndk}/toolchains/llvm/prebuilt/linux-x86_64"
 
+          # Use API level 21 for maximum Termux compatibility
+          # (supports Android 5.0+ / Termux on older devices)
+          api_level="21"
+
           # Configure Cargo to use the NDK linker
           cargo_target_var="CARGO_TARGET_${target^^}_LINKER"
           cargo_target_var="${cargo_target_var//-/_}"
-          echo "${cargo_target_var}=${toolchain}/bin/aarch64-linux-android34-clang" >> "$GITHUB_ENV"
+          echo "${cargo_target_var}=${toolchain}/bin/aarch64-linux-android${api_level}-clang" >> "$GITHUB_ENV"
 
           # Set CC and AR for the target
           target_cc_var="CC_${target}"
           target_cc_var="${target_cc_var//-/_}"
-          echo "${target_cc_var}=${toolchain}/bin/aarch64-linux-android34-clang" >> "$GITHUB_ENV"
+          echo "${target_cc_var}=${toolchain}/bin/aarch64-linux-android${api_level}-clang" >> "$GITHUB_ENV"
 
           target_ar_var="AR_${target}"
           target_ar_var="${target_ar_var//-/_}"
