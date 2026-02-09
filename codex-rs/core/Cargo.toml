@@ -65,7 +65,7 @@ os_info = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 regex-lite = { workspace = true }
-reqwest = { workspace = true, features = ["json", "stream"] }
+reqwest = { workspace = true, features = ["json", "stream", "rustls-tls"] }
 rmcp = { workspace = true, default-features = false, features = [
     "base64",
     "macros",
@@ -132,6 +132,11 @@ openssl-sys = { workspace = true, features = ["vendored"] }
 # Build OpenSSL from source for musl builds.
 [target.aarch64-unknown-linux-musl.dependencies]
 openssl-sys = { workspace = true, features = ["vendored"] }
+
+# Build OpenSSL from source for Android builds.
+[target.aarch64-linux-android.dependencies]
+openssl-sys = { workspace = true, features = ["vendored"] }
+keyring = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { workspace = true, features = ["windows-native"] }

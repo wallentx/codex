@@ -12,7 +12,7 @@ futures = { workspace = true }
 http = { workspace = true }
 opentelemetry = { workspace = true }
 rand = { workspace = true }
-reqwest = { workspace = true, features = ["json", "stream"] }
+reqwest = { workspace = true, features = ["json", "stream", "rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
