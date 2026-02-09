@@ -31,6 +31,7 @@ jobs:
       - uses: facebook/install-dotslash@v2
 
       - name: Stage npm package
+        if: github.repository == 'openai/codex'
         id: stage_npm_package
         env:
           GH_TOKEN: ${{ github.token }}
@@ -47,6 +48,7 @@ jobs:
           echo "pack_output=$PACK_OUTPUT" >> "$GITHUB_OUTPUT"
 
       - name: Upload staged npm package artifact
+        if: github.repository == 'openai/codex'
         uses: actions/upload-artifact@v6
         with:
           name: codex-npm-staging

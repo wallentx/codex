@@ -89,8 +89,12 @@ jobs:
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     timeout-minutes: 30
     needs: changed
-    # Keep job-level if to avoid spinning up runners when not needed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
+    # Keep job-level if to avoid spinning up runners when not needed.
+    # Also skip jobs that require OpenAI runner groups when running in forks.
+    if: |
+      (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push') &&
+      (matrix.openai_only != true || github.repository_owner == 'openai') &&
+      (matrix.fork_only != true || github.repository_owner != 'openai')
     defaults:
       run:
         working-directory: codex-rs
@@ -107,74 +111,122 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # OpenAI internal runners (paid macOS xlarge runners)
           - runner: macos-15-xlarge
             target: aarch64-apple-darwin
             profile: dev
+            openai_only: true
           - runner: macos-15-xlarge
             target: x86_64-apple-darwin
             profile: dev
+            openai_only: true
+          # Fork-friendly macOS runners
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            profile: dev
+            fork_only: true
+          # OpenAI internal runners (with runner groups)
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             profile: dev
             runs_on:
               group: codex-runners
               labels: codex-linux-x64
+            openai_only: true
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             profile: dev
             runs_on:
               group: codex-runners
               labels: codex-linux-x64
+            openai_only: true
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             profile: dev
             runs_on:
               group: codex-runners
               labels: codex-linux-arm64
+            openai_only: true
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             profile: dev
             runs_on:
               group: codex-runners
               labels: codex-linux-arm64
+            openai_only: true
           - runner: windows-x64
             target: x86_64-pc-windows-msvc
             profile: dev
             runs_on:
               group: codex-runners
               labels: codex-windows-x64
+            openai_only: true
           - runner: windows-arm64
             target: aarch64-pc-windows-msvc
             profile: dev
             runs_on:
               group: codex-runners
               labels: codex-windows-arm64
+            openai_only: true
+          # Fork-friendly runners (public GitHub runners)
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            profile: dev
+            fork_only: true
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            profile: dev
+            fork_only: true
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            profile: dev
+            fork_only: true
 
           # Also run representative release builds on Mac and Linux because
           # there could be release-only build errors we want to catch.
           # Hopefully this also pre-populates the build cache to speed up
           # releases.
+          # OpenAI internal release runners (paid macOS xlarge)
           - runner: macos-15-xlarge
             target: aarch64-apple-darwin
             profile: release
+            openai_only: true
+          # Fork-friendly release runners
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            profile: release
+            fork_only: true
+          # OpenAI internal release runners
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             profile: release
             runs_on:
               group: codex-runners
               labels: codex-linux-x64
+            openai_only: true
           - runner: windows-x64
             target: x86_64-pc-windows-msvc
             profile: release
             runs_on:
               group: codex-runners
               labels: codex-windows-x64
+            openai_only: true
           - runner: windows-arm64
             target: aarch64-pc-windows-msvc
             profile: release
             runs_on:
               group: codex-runners
               labels: codex-windows-arm64
+            openai_only: true
+          # Fork-friendly release runners
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            profile: release
+            fork_only: true
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            profile: release
+            fork_only: true
 
     steps:
       - uses: actions/checkout@v6
@@ -461,7 +513,12 @@ jobs:
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     timeout-minutes: 30
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
+    # Keep job-level if to avoid spinning up runners when not needed.
+    # Also skip jobs that require OpenAI runner groups when running in forks.
+    if: |
+      (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push') &&
+      (matrix.openai_only != true || github.repository_owner == 'openai') &&
+      (matrix.fork_only != true || github.repository_owner != 'openai')
     defaults:
       run:
         working-directory: codex-rs
@@ -478,33 +535,54 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # OpenAI internal runners (paid macOS xlarge runners)
           - runner: macos-15-xlarge
             target: aarch64-apple-darwin
             profile: dev
+            openai_only: true
+          # Fork-friendly macOS runners
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            profile: dev
+            fork_only: true
+          # OpenAI internal runners (with runner groups)
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             profile: dev
             runs_on:
               group: codex-runners
               labels: codex-linux-x64
+            openai_only: true
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             profile: dev
             runs_on:
               group: codex-runners
               labels: codex-linux-arm64
+            openai_only: true
           - runner: windows-x64
             target: x86_64-pc-windows-msvc
             profile: dev
             runs_on:
               group: codex-runners
               labels: codex-windows-x64
+            openai_only: true
           - runner: windows-arm64
             target: aarch64-pc-windows-msvc
             profile: dev
             runs_on:
               group: codex-runners
               labels: codex-windows-arm64
+            openai_only: true
+          # Fork-friendly runners (public GitHub runners)
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            profile: dev
+            fork_only: true
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            profile: dev
+            fork_only: true
 
     steps:
       - uses: actions/checkout@v6

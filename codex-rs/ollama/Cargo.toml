@@ -16,7 +16,7 @@ async-stream = { workspace = true }
 bytes = { workspace = true }
 codex-core = { workspace = true }
 futures = { workspace = true }
-reqwest = { workspace = true, features = ["json", "stream"] }
+reqwest = { workspace = true, features = ["json", "stream", "rustls-tls"] }
 semver = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = [

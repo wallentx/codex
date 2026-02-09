@@ -70,6 +70,10 @@ jobs:
   rust-binaries:
     name: Build Rust - ${{ matrix.target }}
     needs: metadata
+    # Skip paid runners on forks (though this workflow is typically only called from releases)
+    if: |
+      (matrix.openai_only != true || github.repository_owner == 'openai') &&
+      (matrix.fork_only != true || github.repository_owner != 'openai')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     defaults:
@@ -79,15 +83,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # OpenAI internal runners (paid)
           - runner: macos-15-xlarge
             target: aarch64-apple-darwin
+            openai_only: true
           - runner: macos-15-xlarge
             target: x86_64-apple-darwin
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            install_musl: true
+            openai_only: true
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            install_musl: true
+            openai_only: true
+          # Fork-friendly runners
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            fork_only: true
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
             install_musl: true
     steps:
       - name: Checkout repository
@@ -190,6 +202,10 @@ jobs:
   bash-linux:
     name: Build Bash (Linux) - ${{ matrix.variant }} - ${{ matrix.target }}
     needs: metadata
+    # Skip paid runners on forks
+    if: |
+      (matrix.openai_only != true || github.repository_owner == 'openai') &&
+      (matrix.fork_only != true || github.repository_owner != 'openai')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     container:
@@ -218,30 +234,37 @@ jobs:
             target: x86_64-unknown-linux-musl
             variant: centos-9
             image: quay.io/centos/centos:stream9
+          # OpenAI internal runners (paid arm runners)
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             variant: ubuntu-24.04
             image: arm64v8/ubuntu:24.04
+            openai_only: true
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             variant: ubuntu-22.04
             image: arm64v8/ubuntu:22.04
+            openai_only: true
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             variant: ubuntu-20.04
             image: arm64v8/ubuntu:20.04
+            openai_only: true
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             variant: debian-12
             image: arm64v8/debian:12
+            openai_only: true
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             variant: debian-11
             image: arm64v8/debian:11
+            openai_only: true
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             variant: centos-9
             image: quay.io/centos/centos:stream9
+            openai_only: true
     steps:
       - name: Install build prerequisites
         shell: bash
@@ -288,15 +311,22 @@ jobs:
   bash-darwin:
     name: Build Bash (macOS) - ${{ matrix.variant }} - ${{ matrix.target }}
     needs: metadata
+    # Skip paid runners on forks
+    if: |
+      (matrix.openai_only != true || github.repository_owner == 'openai') &&
+      (matrix.fork_only != true || github.repository_owner != 'openai')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
+          # OpenAI internal runners (paid xlarge)
           - runner: macos-15-xlarge
             target: aarch64-apple-darwin
             variant: macos-15
+            openai_only: true
+          # Fork-friendly runners
           - runner: macos-14
             target: aarch64-apple-darwin
             variant: macos-14
