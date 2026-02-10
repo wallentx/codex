@@ -200,10 +200,11 @@ pub fn build_reqwest_client() -> reqwest::Client {
         builder = builder.no_proxy();
     }
 
-    // Attempt to use our custom resolver that handles Termux/Android.
-    // If it initializes successfully (which it should, falling back to Google DNS if needed),
-    // use it. Otherwise, default to standard reqwest behavior.
-    if let Ok(resolver) = crate::dns_fallback::TermuxResolver::new() {
+    // On Termux/Android, system DNS config can be missing from /etc/resolv.conf.
+    // Install a resolver with layered fallbacks only in that environment.
+    if crate::dns_fallback::should_install_termux_resolver()
+        && let Ok(resolver) = crate::dns_fallback::TermuxResolver::new()
+    {
         builder = builder.dns_resolver(std::sync::Arc::new(resolver));
     }
 
