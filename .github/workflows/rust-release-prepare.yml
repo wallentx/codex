@@ -15,7 +15,7 @@ permissions:
 jobs:
   prepare:
     # Prevent scheduled runs on forks (no secrets, wastes Actions minutes)
-    if: github.repository == 'openai/codex'
+    if: github.repository_owner == 'openai'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
