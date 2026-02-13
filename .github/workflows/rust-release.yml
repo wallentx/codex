@@ -11,6 +11,12 @@ on:
     tags:
       - "rust-v*.*.*"
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Branch, tag, or commit SHA to build (code only; keeps .github from dispatched ref)"
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}
@@ -87,6 +93,27 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+      - name: Checkout selected source ref
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref != '' }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_ref }}
+          path: __source__
+          fetch-depth: 1
+      - name: Overlay selected source ref (excluding .github)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref != '' }}
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          echo "Using source ref: ${{ inputs.source_ref }}"
+          shopt -s dotglob extglob
+
+          # Keep workflow/actions from the dispatch ref while replacing all other files.
+          rm -rf -- !(.git|.github|__source__)
+          tar --exclude='.github' -C __source__ -cf - . | tar -xf -
+          rm -rf __source__
+
       - name: Install Android NDK
         if: ${{ matrix.target == 'aarch64-linux-android' }}
         shell: bash
