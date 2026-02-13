@@ -70,7 +70,7 @@ jobs:
           echo "::endgroup::"
 
   select-build-matrix:
-    if: needs.tag-check.result == 'success' || needs.tag-check.result == 'skipped'
+    if: github.event_name == 'workflow_dispatch' || needs.tag-check.result == 'success'
     needs: tag-check
     runs-on: ubuntu-latest
     outputs:
@@ -114,7 +114,7 @@ jobs:
 
   build:
     if: >-
-      (needs.tag-check.result == 'success' || needs.tag-check.result == 'skipped') &&
+      (github.event_name == 'workflow_dispatch' || needs.tag-check.result == 'success') &&
       needs.select-build-matrix.result == 'success'
     needs:
       - tag-check
