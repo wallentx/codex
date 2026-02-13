@@ -69,13 +69,54 @@ jobs:
           echo "✅  Tag and Cargo.toml agree (${tag_ver})"
           echo "::endgroup::"
 
-  build:
-    if: >-
-      always() &&
-      (needs.tag-check.result == 'success' || needs.tag-check.result == 'skipped') &&
-      (github.repository_owner == 'openai' || !contains(matrix.runner, 'macos')) &&
-      (github.event_name != 'workflow_dispatch' || inputs.build_target == 'all' || inputs.build_target == matrix.target)
+  select-build-matrix:
+    if: always() && (needs.tag-check.result == 'success' || needs.tag-check.result == 'skipped')
     needs: tag-check
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - id: select
+        shell: bash
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+          EVENT_NAME: ${{ github.event_name }}
+          BUILD_TARGET: ${{ inputs.build_target }}
+        run: |
+          set -euo pipefail
+
+          matrix='[
+            {"runner":"macos-15-xlarge","target":"aarch64-apple-darwin"},
+            {"runner":"macos-15-xlarge","target":"x86_64-apple-darwin"},
+            {"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl"},
+            {"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu"},
+            {"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"},
+            {"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"},
+            {"runner":"ubuntu-24.04","target":"aarch64-linux-android"},
+            {"runner":"windows-latest","target":"x86_64-pc-windows-msvc"},
+            {"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc"}
+          ]'
+
+          if [[ "${REPO_OWNER}" != "openai" ]]; then
+            matrix="$(jq -c '[.[] | select(.runner | startswith("macos") | not)]' <<< "${matrix}")"
+          fi
+
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" && -n "${BUILD_TARGET}" && "${BUILD_TARGET}" != "all" ]]; then
+            matrix="$(jq -c --arg build_target "${BUILD_TARGET}" '[.[] | select(.target == $build_target)]' <<< "${matrix}")"
+          fi
+
+          if [[ "$(jq 'length' <<< "${matrix}")" -eq 0 ]]; then
+            echo "No build targets selected after applying owner/dispatch filters." >&2
+            exit 1
+          fi
+
+          echo "matrix={\"include\":${matrix}}" >> "$GITHUB_OUTPUT"
+
+  build:
+    if: always() && needs.select-build-matrix.result == 'success'
+    needs:
+      - tag-check
+      - select-build-matrix
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -90,26 +131,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15-xlarge
-            target: aarch64-apple-darwin
-          - runner: macos-15-xlarge
-            target: x86_64-apple-darwin
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - runner: ubuntu-24.04
-            target: aarch64-linux-android
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
+      matrix: ${{ fromJson(needs.select-build-matrix.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v6
