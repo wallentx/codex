@@ -75,9 +75,22 @@ jobs:
             target: aarch64-unknown-linux-musl
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-24.04
+            target: aarch64-linux-android
 
     steps:
       - uses: actions/checkout@v6
+      - name: Install Android NDK
+        if: ${{ matrix.target == 'aarch64-linux-android' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Installing Android NDK..."
+          # Install Android NDK using sdkmanager
+          yes | sudo ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          sudo ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" >> "$GITHUB_ENV"
       - name: Print runner specs (Linux)
         if: ${{ runner.os == 'Linux' }}
         shell: bash
@@ -108,7 +121,7 @@ jobs:
           echo "Disk usage:"
           df -h .
       - name: Install Linux bwrap build dependencies
-        if: ${{ runner.os == 'Linux' }}
+        if: ${{ runner.os == 'Linux' && matrix.target != 'aarch64-linux-android' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -126,6 +139,42 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
           targets: ${{ matrix.target }}
+
+      - if: ${{ matrix.target == 'aarch64-linux-android' }}
+        name: Configure Android build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_NDK_HOME}"
+          target="${{ matrix.target }}"
+
+          # Set up the Android toolchain
+          toolchain="${ndk}/toolchains/llvm/prebuilt/linux-x86_64"
+
+          # Use API level 21 for maximum Termux compatibility
+          # (supports Android 5.0+ / Termux on older devices)
+          api_level="21"
+
+          # Configure Cargo to use the NDK linker
+          cargo_target_var="CARGO_TARGET_${target^^}_LINKER"
+          cargo_target_var="${cargo_target_var//-/_}"
+          echo "${cargo_target_var}=${toolchain}/bin/aarch64-linux-android${api_level}-clang" >> "$GITHUB_ENV"
+
+          # Set CC and AR for the target
+          target_cc_var="CC_${target}"
+          target_cc_var="${target_cc_var//-/_}"
+          echo "${target_cc_var}=${toolchain}/bin/aarch64-linux-android${api_level}-clang" >> "$GITHUB_ENV"
+
+          target_ar_var="AR_${target}"
+          target_ar_var="${target_ar_var//-/_}"
+          echo "${target_ar_var}=${toolchain}/bin/llvm-ar" >> "$GITHUB_ENV"
+
+          # Add toolchain to PATH
+          echo "${toolchain}/bin" >> "$GITHUB_PATH"
+
+          # Configure for vendored OpenSSL build
+          echo "CARGO_BUILD_TARGET_APPLIES_TO_HOST=false" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_TARGET=${{ matrix.target }}" >> "$GITHUB_ENV"
 
       - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
         name: Use hermetic Cargo home (musl)
@@ -214,7 +263,7 @@ jobs:
           path: codex-rs/target/**/cargo-timings/cargo-timing.html
           if-no-files-found: warn
 
-      - if: ${{ contains(matrix.target, 'linux') }}
+      - if: ${{ contains(matrix.target, 'linux') && !contains(matrix.target, 'android') }}
         name: Cosign Linux artifacts
         uses: ./.github/actions/linux-code-sign
         with:
@@ -302,7 +351,7 @@ jobs:
           cp target/${{ matrix.target }}/release/codex "$dest/codex-${{ matrix.target }}"
           cp target/${{ matrix.target }}/release/codex-responses-api-proxy "$dest/codex-responses-api-proxy-${{ matrix.target }}"
 
-          if [[ "${{ matrix.target }}" == *linux* ]]; then
+          if [[ "${{ matrix.target }}" == *linux* && "${{ matrix.target }}" != *android* ]]; then
             cp target/${{ matrix.target }}/release/codex.sigstore "$dest/codex-${{ matrix.target }}.sigstore"
             cp target/${{ matrix.target }}/release/codex-responses-api-proxy.sigstore "$dest/codex-responses-api-proxy-${{ matrix.target }}.sigstore"
           fi
