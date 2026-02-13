@@ -70,7 +70,7 @@ jobs:
           echo "::endgroup::"
 
   select-build-matrix:
-    if: always() && (needs.tag-check.result == 'success' || needs.tag-check.result == 'skipped')
+    if: needs.tag-check.result == 'success' || needs.tag-check.result == 'skipped'
     needs: tag-check
     runs-on: ubuntu-latest
     outputs:
@@ -113,7 +113,9 @@ jobs:
           echo "matrix={\"include\":${matrix}}" >> "$GITHUB_OUTPUT"
 
   build:
-    if: always() && needs.select-build-matrix.result == 'success'
+    if: >-
+      (needs.tag-check.result == 'success' || needs.tag-check.result == 'skipped') &&
+      needs.select-build-matrix.result == 'success'
     needs:
       - tag-check
       - select-build-matrix
