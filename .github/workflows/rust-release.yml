@@ -263,7 +263,7 @@ jobs:
           path: codex-rs/target/**/cargo-timings/cargo-timing.html
           if-no-files-found: warn
 
-      - if: ${{ contains(matrix.target, 'linux') && !contains(matrix.target, 'android') }}
+      - if: ${{ contains(matrix.target, 'linux') }}
         name: Cosign Linux artifacts
         uses: ./.github/actions/linux-code-sign
         with:
@@ -351,7 +351,7 @@ jobs:
           cp target/${{ matrix.target }}/release/codex "$dest/codex-${{ matrix.target }}"
           cp target/${{ matrix.target }}/release/codex-responses-api-proxy "$dest/codex-responses-api-proxy-${{ matrix.target }}"
 
-          if [[ "${{ matrix.target }}" == *linux* && "${{ matrix.target }}" != *android* ]]; then
+          if [[ "${{ matrix.target }}" == *linux* ]]; then
             cp target/${{ matrix.target }}/release/codex.sigstore "$dest/codex-${{ matrix.target }}.sigstore"
             cp target/${{ matrix.target }}/release/codex-responses-api-proxy.sigstore "$dest/codex-responses-api-proxy-${{ matrix.target }}.sigstore"
           fi
