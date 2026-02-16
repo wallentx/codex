@@ -159,6 +159,36 @@ jobs:
           tar --exclude='.github' -C __source__ -cf - . | tar -xf -
           rm -rf __source__
 
+      - name: Set build version from latest upstream tag
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+
+          latest_tag="$(
+            git ls-remote --tags --refs https://github.com/openai/codex.git 'rust-v[0-9]*.[0-9]*.[0-9]*' \
+              | awk -F/ '{print $3}' \
+              | sed 's/^rust-v//' \
+              | sort -V \
+              | tail -n 1
+          )"
+
+          if [[ -z "${latest_tag}" ]]; then
+            echo "Unable to determine latest upstream rust-v tag from openai/codex" >&2
+            exit 1
+          fi
+
+          build_version="${latest_tag}-dev"
+          echo "Using build version: ${build_version}"
+          echo "CODEX_BUILD_VERSION=${build_version}" >> "$GITHUB_ENV"
+
+          BUILD_VERSION="${build_version}" perl -0777 -i -pe \
+            's/(\[workspace\.package\][^\[]*?version = ")([^"]+)(")/${1}$ENV{BUILD_VERSION}$3/s' \
+            codex-rs/Cargo.toml
+
+          grep -n "^\[workspace.package\]\|^version = " codex-rs/Cargo.toml | head -n 4
+
       - name: Install Android NDK
         if: ${{ matrix.target == 'aarch64-linux-android' }}
         shell: bash
