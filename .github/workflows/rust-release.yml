@@ -115,9 +115,7 @@ jobs:
 
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             latest_release_tag="$(
-              curl -fsSL "https://api.github.com/repos/openai/codex/releases/latest" \
-                | tr -d '\n' \
-                | sed -n 's/.*"tag_name":"\([^"]*\)".*/\1/p'
+              GH_TOKEN="${{ github.token }}" gh api repos/openai/codex/releases/latest --jq '.tag_name'
             )"
 
             if [[ -z "${latest_release_tag}" || "${latest_release_tag}" != rust-v* ]]; then
