@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::RwLock;
 
+use codex_app_server_protocol::ConfigLayerSource;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use toml::Value as TomlValue;
@@ -13,9 +15,11 @@ use tracing::warn;
 use crate::config::Config;
 use crate::config::types::SkillsConfig;
 use crate::config_loader::CloudRequirementsLoader;
+use crate::config_loader::ConfigLayerStackOrdering;
 use crate::config_loader::LoaderOverrides;
 use crate::config_loader::load_config_layers_state;
 use crate::skills::SkillLoadOutcome;
+use crate::skills::build_implicit_skill_path_indexes;
 use crate::skills::loader::SkillRoot;
 use crate::skills::loader::load_skills_from_roots;
 use crate::skills::loader::skill_roots_from_layer_stack_with_agents;
@@ -50,6 +54,10 @@ impl SkillsManager {
             skill_roots_from_layer_stack_with_agents(&config.config_layer_stack, &config.cwd);
         let mut outcome = load_skills_from_roots(roots);
         outcome.disabled_paths = disabled_paths_from_stack(&config.config_layer_stack);
+        let (by_scripts_dir, by_doc_path) =
+            build_implicit_skill_path_indexes(outcome.allowed_skills_for_implicit_invocation());
+        outcome.implicit_skills_by_scripts_dir = Arc::new(by_scripts_dir);
+        outcome.implicit_skills_by_doc_path = Arc::new(by_doc_path);
         let mut cache = match self.cache_by_cwd.write() {
             Ok(cache) => cache,
             Err(err) => err.into_inner(),
@@ -124,7 +132,17 @@ impl SkillsManager {
                 }),
         );
         let mut outcome = load_skills_from_roots(roots);
+        if !extra_user_roots.is_empty() {
+            // When extra user roots are provided, skip system skills before caching the result.
+            outcome
+                .skills
+                .retain(|skill| skill.scope != SkillScope::System);
+        }
         outcome.disabled_paths = disabled_paths_from_stack(&config_layer_stack);
+        let (by_scripts_dir, by_doc_path) =
+            build_implicit_skill_path_indexes(outcome.allowed_skills_for_implicit_invocation());
+        outcome.implicit_skills_by_scripts_dir = Arc::new(by_scripts_dir);
+        outcome.implicit_skills_by_doc_path = Arc::new(by_doc_path);
         let mut cache = match self.cache_by_cwd.write() {
             Ok(cache) => cache,
             Err(err) => err.into_inner(),
@@ -156,24 +174,31 @@ fn disabled_paths_from_stack(
 ) -> HashSet<PathBuf> {
     let mut disabled = HashSet::new();
     let mut configs = HashMap::new();
-    // Skills config is user-layer only for now; higher-precedence layers are ignored.
-    let Some(user_layer) = config_layer_stack.get_user_layer() else {
-        return disabled;
-    };
-    let Some(skills_value) = user_layer.config.get("skills") else {
-        return disabled;
-    };
-    let skills: SkillsConfig = match skills_value.clone().try_into() {
-        Ok(skills) => skills,
-        Err(err) => {
-            warn!("invalid skills config: {err}");
-            return disabled;
+    for layer in
+        config_layer_stack.get_layers(ConfigLayerStackOrdering::LowestPrecedenceFirst, true)
+    {
+        if !matches!(
+            layer.name,
+            ConfigLayerSource::User { .. } | ConfigLayerSource::SessionFlags
+        ) {
+            continue;
         }
-    };
 
-    for entry in skills.config {
-        let path = normalize_override_path(entry.path.as_path());
-        configs.insert(path, entry.enabled);
+        let Some(skills_value) = layer.config.get("skills") else {
+            continue;
+        };
+        let skills: SkillsConfig = match skills_value.clone().try_into() {
+            Ok(skills) => skills,
+            Err(err) => {
+                warn!("invalid skills config: {err}");
+                continue;
+            }
+        };
+
+        for entry in skills.config {
+            let path = normalize_override_path(entry.path.as_path());
+            configs.insert(path, entry.enabled);
+        }
     }
 
     for (path, enabled) in configs {
@@ -204,6 +229,9 @@ mod tests {
     use super::*;
     use crate::config::ConfigBuilder;
     use crate::config::ConfigOverrides;
+    use crate::config_loader::ConfigLayerEntry;
+    use crate::config_loader::ConfigLayerStack;
+    use crate::config_loader::ConfigRequirementsToml;
     use pretty_assertions::assert_eq;
     use std::fs;
     use std::path::PathBuf;
@@ -385,5 +413,86 @@ mod tests {
         let second = normalize_extra_user_roots(&[b, a]);
 
         assert_eq!(first, second);
+    }
+
+    #[cfg_attr(windows, ignore)]
+    #[test]
+    fn disabled_paths_from_stack_allows_session_flags_to_override_user_layer() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let skill_path = tempdir.path().join("skills").join("demo").join("SKILL.md");
+        let user_file = AbsolutePathBuf::try_from(tempdir.path().join("config.toml"))
+            .expect("user config path should be absolute");
+        let user_layer = ConfigLayerEntry::new(
+            ConfigLayerSource::User { file: user_file },
+            toml::from_str(&format!(
+                r#"[[skills.config]]
+path = "{}"
+enabled = false
+"#,
+                skill_path.display()
+            ))
+            .expect("user layer toml"),
+        );
+        let session_layer = ConfigLayerEntry::new(
+            ConfigLayerSource::SessionFlags,
+            toml::from_str(&format!(
+                r#"[[skills.config]]
+path = "{}"
+enabled = true
+"#,
+                skill_path.display()
+            ))
+            .expect("session layer toml"),
+        );
+        let stack = ConfigLayerStack::new(
+            vec![user_layer, session_layer],
+            Default::default(),
+            ConfigRequirementsToml::default(),
+        )
+        .expect("valid config layer stack");
+
+        assert_eq!(disabled_paths_from_stack(&stack), HashSet::new());
+    }
+
+    #[cfg_attr(windows, ignore)]
+    #[test]
+    fn disabled_paths_from_stack_allows_session_flags_to_disable_user_enabled_skill() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let skill_path = tempdir.path().join("skills").join("demo").join("SKILL.md");
+        let user_file = AbsolutePathBuf::try_from(tempdir.path().join("config.toml"))
+            .expect("user config path should be absolute");
+        let user_layer = ConfigLayerEntry::new(
+            ConfigLayerSource::User { file: user_file },
+            toml::from_str(&format!(
+                r#"[[skills.config]]
+path = "{}"
+enabled = true
+"#,
+                skill_path.display()
+            ))
+            .expect("user layer toml"),
+        );
+        let session_layer = ConfigLayerEntry::new(
+            ConfigLayerSource::SessionFlags,
+            toml::from_str(&format!(
+                r#"[[skills.config]]
+path = "{}"
+enabled = false
+"#,
+                skill_path.display()
+            ))
+            .expect("session layer toml"),
+        );
+        let stack = ConfigLayerStack::new(
+            vec![user_layer, session_layer],
+            Default::default(),
+            ConfigRequirementsToml::default(),
+        )
+        .expect("valid config layer stack");
+
+        assert_eq!(
+            disabled_paths_from_stack(&stack),
+            HashSet::from([skill_path])
+        );
     }
 }
