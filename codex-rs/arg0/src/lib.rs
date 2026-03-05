@@ -26,12 +26,12 @@ pub struct Arg0DispatchPaths {
 /// Keeps the per-session PATH entry alive and locked for the process lifetime.
 pub struct Arg0PathEntryGuard {
     _temp_dir: TempDir,
-    _lock_file: File,
+    _lock_file: Option<File>,
     paths: Arg0DispatchPaths,
 }
 
 impl Arg0PathEntryGuard {
-    fn new(temp_dir: TempDir, lock_file: File, paths: Arg0DispatchPaths) -> Self {
+    fn new(temp_dir: TempDir, lock_file: Option<File>, paths: Arg0DispatchPaths) -> Self {
         Self {
             _temp_dir: temp_dir,
             _lock_file: lock_file,
@@ -270,7 +270,13 @@ pub fn prepend_path_entry_for_codex_aliases() -> std::io::Result<Arg0PathEntryGu
         .create(true)
         .truncate(false)
         .open(&lock_path)?;
-    lock_file.try_lock()?;
+    let lock_file = match lock_file.try_lock() {
+        Ok(()) => Some(lock_file),
+        Err(std::fs::TryLockError::Error(err)) if err.kind() == std::io::ErrorKind::Unsupported => {
+            None
+        }
+        Err(err) => return Err(err.into()),
+    };
 
     for filename in &[
         APPLY_PATCH_ARG0,
@@ -389,6 +395,9 @@ fn try_lock_dir(dir: &Path) -> std::io::Result<Option<File>> {
     match lock_file.try_lock() {
         Ok(()) => Ok(Some(lock_file)),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(err)) if err.kind() == std::io::ErrorKind::Unsupported => {
+            Ok(None)
+        }
         Err(err) => Err(err.into()),
     }
 }
@@ -429,7 +438,15 @@ mod tests {
         let dir = root.path().join("locked");
         fs::create_dir(&dir)?;
         let lock_file = create_lock(&dir)?;
-        lock_file.try_lock()?;
+        match lock_file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::Error(err))
+                if err.kind() == std::io::ErrorKind::Unsupported =>
+            {
+                return Ok(());
+            }
+            Err(err) => return Err(err.into()),
+        }
 
         janitor_cleanup(root.path())?;
 
@@ -442,11 +459,24 @@ mod tests {
         let root = tempfile::tempdir()?;
         let dir = root.path().join("stale");
         fs::create_dir(&dir)?;
-        create_lock(&dir)?;
+        let lock_file = create_lock(&dir)?;
+        let lock_supported = match lock_file.try_lock() {
+            Ok(()) => true,
+            Err(std::fs::TryLockError::Error(err))
+                if err.kind() == std::io::ErrorKind::Unsupported =>
+            {
+                false
+            }
+            Err(err) => return Err(err.into()),
+        };
 
         janitor_cleanup(root.path())?;
 
-        assert!(!dir.exists());
+        if lock_supported {
+            assert!(!dir.exists());
+        } else {
+            assert!(dir.exists());
+        }
         Ok(())
     }
 }
