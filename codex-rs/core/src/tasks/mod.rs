@@ -33,6 +33,11 @@ use crate::protocol::TurnCompleteEvent;
 use crate::state::ActiveTurn;
 use crate::state::RunningTask;
 use crate::state::TaskKind;
+use codex_otel::SessionTelemetry;
+use codex_otel::metrics::names::TURN_E2E_DURATION_METRIC;
+use codex_otel::metrics::names::TURN_NETWORK_PROXY_METRIC;
+use codex_otel::metrics::names::TURN_TOKEN_USAGE_METRIC;
+use codex_otel::metrics::names::TURN_TOOL_CALL_METRIC;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
@@ -52,6 +57,19 @@ pub(crate) use user_shell::execute_user_shell_command;
 
 const GRACEFULL_INTERRUPTION_TIMEOUT_MS: u64 = 100;
 const TURN_ABORTED_INTERRUPTED_GUIDANCE: &str = "The user interrupted the previous turn on purpose. Any running unified exec processes were terminated. If any tools/commands were aborted, they may have partially executed; verify current state before retrying.";
+
+fn emit_turn_network_proxy_metric(
+    session_telemetry: &SessionTelemetry,
+    network_proxy_active: bool,
+    tmp_mem: (&str, &str),
+) {
+    let active = if network_proxy_active {
+        "true"
+    } else {
+        "false"
+    };
+    session_telemetry.counter(TURN_NETWORK_PROXY_METRIC, 1, &[("active", active), tmp_mem]);
+}
 
 /// Thin wrapper that exposes the parts of [`Session`] task runners need.
 #[derive(Clone)]
@@ -145,7 +163,7 @@ impl Session {
 
         let timer = turn_context
             .session_telemetry
-            .start_timer("codex.turn.e2e_duration_ms", &[])
+            .start_timer(TURN_E2E_DURATION_METRIC, &[])
             .ok();
 
         let done_clone = Arc::clone(&done);
@@ -208,9 +226,6 @@ impl Session {
             // Let interrupted tasks observe cancellation before dropping pending approvals, or an
             // in-flight approval wait can surface as a model-visible rejection before TurnAborted.
             active_turn.clear_pending().await;
-        }
-        if reason == TurnAbortReason::Interrupted {
-            self.close_unified_exec_processes().await;
         }
     }
 
@@ -277,8 +292,27 @@ impl Session {
                     "false"
                 },
             );
+            let network_proxy_active = match self.services.network_proxy.as_ref() {
+                Some(started_network_proxy) => {
+                    match started_network_proxy.proxy().current_cfg().await {
+                        Ok(config) => config.network.enabled,
+                        Err(err) => {
+                            warn!(
+                                "failed to read managed network proxy state for turn metrics: {err:#}"
+                            );
+                            false
+                        }
+                    }
+                }
+                None => false,
+            };
+            emit_turn_network_proxy_metric(
+                &self.services.session_telemetry,
+                network_proxy_active,
+                tmp_mem,
+            );
             self.services.session_telemetry.histogram(
-                "codex.turn.tool.call",
+                TURN_TOOL_CALL_METRIC,
                 i64::try_from(turn_tool_calls).unwrap_or(i64::MAX),
                 &[tmp_mem],
             );
@@ -301,27 +335,27 @@ impl Session {
                     .max(0),
             };
             self.services.session_telemetry.histogram(
-                "codex.turn.token_usage",
+                TURN_TOKEN_USAGE_METRIC,
                 turn_token_usage.total_tokens,
                 &[("token_type", "total"), tmp_mem],
             );
             self.services.session_telemetry.histogram(
-                "codex.turn.token_usage",
+                TURN_TOKEN_USAGE_METRIC,
                 turn_token_usage.input_tokens,
                 &[("token_type", "input"), tmp_mem],
             );
             self.services.session_telemetry.histogram(
-                "codex.turn.token_usage",
+                TURN_TOKEN_USAGE_METRIC,
                 turn_token_usage.cached_input(),
                 &[("token_type", "cached_input"), tmp_mem],
             );
             self.services.session_telemetry.histogram(
-                "codex.turn.token_usage",
+                TURN_TOKEN_USAGE_METRIC,
                 turn_token_usage.output_tokens,
                 &[("token_type", "output"), tmp_mem],
             );
             self.services.session_telemetry.histogram(
-                "codex.turn.token_usage",
+                TURN_TOKEN_USAGE_METRIC,
                 turn_token_usage.reasoning_output_tokens,
                 &[("token_type", "reasoning_output"), tmp_mem],
             );
@@ -359,6 +393,16 @@ impl Session {
             .await;
     }
 
+    pub(crate) async fn cleanup_after_interrupt(&self, turn_context: &Arc<TurnContext>) {
+        self.close_unified_exec_processes().await;
+
+        if let Some(manager) = turn_context.js_repl.manager_if_initialized()
+            && let Err(err) = manager.interrupt_turn_exec(&turn_context.sub_id).await
+        {
+            warn!("failed to interrupt js_repl kernel: {err}");
+        }
+    }
+
     async fn handle_task_abort(self: &Arc<Self>, task: RunningTask, reason: TurnAbortReason) {
         let sub_id = task.turn_context.sub_id.clone();
         if task.cancellation_token.is_cancelled() {
@@ -388,6 +432,8 @@ impl Session {
             .await;
 
         if reason == TurnAbortReason::Interrupted {
+            self.cleanup_after_interrupt(&task.turn_context).await;
+
             let marker = ResponseItem::Message {
                 id: None,
                 role: "user".to_string(),
@@ -417,4 +463,5 @@ impl Session {
 }
 
 #[cfg(test)]
-mod tests {}
+#[path = "mod_tests.rs"]
+mod tests;

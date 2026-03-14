@@ -56,6 +56,7 @@ use codex_chatgpt::connectors;
 use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_core::config::ConstraintResult;
+use codex_core::config::types::ApprovalsReviewer;
 use codex_core::config::types::Notifications;
 use codex_core::config::types::WindowsSandboxModeToml;
 use codex_core::config_loader::ConfigLayerStackOrdering;
@@ -101,6 +102,7 @@ use codex_protocol::protocol::AgentReasoningRawContentEvent;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::BackgroundEventEvent;
 use codex_protocol::protocol::CodexErrorInfo;
+use codex_protocol::protocol::CollabAgentSpawnBeginEvent;
 use codex_protocol::protocol::CreditsSnapshot;
 use codex_protocol::protocol::DeprecationNoticeEvent;
 use codex_protocol::protocol::ErrorEvent;
@@ -112,6 +114,8 @@ use codex_protocol::protocol::ExecCommandEndEvent;
 use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::ExitedReviewModeEvent;
+use codex_protocol::protocol::GuardianAssessmentEvent;
+use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::ImageGenerationBeginEvent;
 use codex_protocol::protocol::ImageGenerationEndEvent;
 use codex_protocol::protocol::ListCustomPromptsResponseEvent;
@@ -171,10 +175,10 @@ const PLAN_IMPLEMENTATION_TITLE: &str = "Implement this plan?";
 const PLAN_IMPLEMENTATION_YES: &str = "Yes, implement this plan";
 const PLAN_IMPLEMENTATION_NO: &str = "No, stay in Plan mode";
 const PLAN_IMPLEMENTATION_CODING_MESSAGE: &str = "Implement the plan.";
-const MULTI_AGENT_ENABLE_TITLE: &str = "Enable multi-agent?";
+const MULTI_AGENT_ENABLE_TITLE: &str = "Enable subagents?";
 const MULTI_AGENT_ENABLE_YES: &str = "Yes, enable";
 const MULTI_AGENT_ENABLE_NO: &str = "Not now";
-const MULTI_AGENT_ENABLE_NOTICE: &str = "Multi-agent will be enabled in the next session.";
+const MULTI_AGENT_ENABLE_NOTICE: &str = "Subagents will be enabled in the next session.";
 const PLAN_MODE_REASONING_SCOPE_TITLE: &str = "Apply reasoning change";
 const PLAN_MODE_REASONING_SCOPE_PLAN_ONLY: &str = "Apply to Plan mode override";
 const PLAN_MODE_REASONING_SCOPE_ALL_MODES: &str = "Apply to global default and Plan mode override";
@@ -306,6 +310,7 @@ use strum::IntoEnumIterator;
 const USER_SHELL_COMMAND_HELP_TITLE: &str = "Prefix a command with ! to run it locally";
 const USER_SHELL_COMMAND_HELP_HINT: &str = "Example: !ls";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const FAST_STATUS_MODEL: &str = "gpt-5.4";
 const DEFAULT_STATUS_LINE_ITEMS: [&str; 3] =
     ["model-with-reasoning", "context-remaining", "current-dir"];
 // Track information about an in-flight exec command.
@@ -525,6 +530,95 @@ pub(crate) enum ExternalEditorState {
     Active,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StatusIndicatorState {
+    header: String,
+    details: Option<String>,
+    details_max_lines: usize,
+}
+
+impl StatusIndicatorState {
+    fn working() -> Self {
+        Self {
+            header: String::from("Working"),
+            details: None,
+            details_max_lines: STATUS_DETAILS_DEFAULT_MAX_LINES,
+        }
+    }
+
+    fn is_guardian_review(&self) -> bool {
+        self.header == "Reviewing approval request" || self.header.starts_with("Reviewing ")
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PendingGuardianReviewStatus {
+    entries: Vec<PendingGuardianReviewStatusEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingGuardianReviewStatusEntry {
+    id: String,
+    detail: String,
+}
+
+impl PendingGuardianReviewStatus {
+    fn start_or_update(&mut self, id: String, detail: String) {
+        if let Some(existing) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            existing.detail = detail;
+        } else {
+            self.entries
+                .push(PendingGuardianReviewStatusEntry { id, detail });
+        }
+    }
+
+    fn finish(&mut self, id: &str) -> bool {
+        let original_len = self.entries.len();
+        self.entries.retain(|entry| entry.id != id);
+        self.entries.len() != original_len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    // Guardian review status is derived from the full set of currently pending
+    // review entries. The generic status cache on `ChatWidget` stores whichever
+    // footer is currently rendered; this helper computes the guardian-specific
+    // footer snapshot that should replace it while reviews remain in flight.
+    fn status_indicator_state(&self) -> Option<StatusIndicatorState> {
+        let details = if self.entries.len() == 1 {
+            self.entries.first().map(|entry| entry.detail.clone())
+        } else if self.entries.is_empty() {
+            None
+        } else {
+            let mut lines = self
+                .entries
+                .iter()
+                .take(3)
+                .map(|entry| format!("• {}", entry.detail))
+                .collect::<Vec<_>>();
+            let remaining = self.entries.len().saturating_sub(3);
+            if remaining > 0 {
+                lines.push(format!("+{remaining} more"));
+            }
+            Some(lines.join("\n"))
+        };
+        let details = details?;
+        let header = if self.entries.len() == 1 {
+            String::from("Reviewing approval request")
+        } else {
+            format!("Reviewing {} approval requests", self.entries.len())
+        };
+        let details_max_lines = if self.entries.len() == 1 { 1 } else { 4 };
+        Some(StatusIndicatorState {
+            header,
+            details: Some(details),
+            details_max_lines,
+        })
+    }
+}
+
 /// Maintains the per-session UI state and interaction state machines for the chat screen.
 ///
 /// `ChatWidget` owns the state derived from the protocol event stream (history cells, streaming
@@ -578,6 +672,7 @@ pub(crate) struct ChatWidget {
     // Latest completed user-visible Codex output that `/copy` should place on the clipboard.
     last_copyable_output: Option<String>,
     running_commands: HashMap<String, RunningCommand>,
+    pending_collab_spawn_requests: HashMap<String, multi_agents::SpawnRequestSummary>,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
     skills_initial_state: Option<HashMap<PathBuf, bool>>,
@@ -598,6 +693,7 @@ pub(crate) struct ChatWidget {
     /// currently executing.
     mcp_startup_status: Option<HashMap<String, McpStartupStatus>>,
     connectors_cache: ConnectorsCacheState,
+    connectors_partial_snapshot: Option<ConnectorsSnapshot>,
     connectors_prefetch_in_flight: bool,
     connectors_force_refetch_pending: bool,
     // Queue of interruptive UI events deferred during an active write cycle
@@ -606,8 +702,13 @@ pub(crate) struct ChatWidget {
     reasoning_buffer: String,
     // Accumulates full reasoning content for transcript-only recording
     full_reasoning_buffer: String,
-    // Current status header shown in the status indicator.
-    current_status_header: String,
+    // The currently rendered footer state. We keep the already-formatted
+    // details here so transient stream interruptions can restore the footer
+    // exactly as it was shown.
+    current_status: StatusIndicatorState,
+    // Guardian review keeps its own pending set so it can derive a single
+    // footer summary from one or more in-flight review events.
+    pending_guardian_review_status: PendingGuardianReviewStatus,
     // Previous status header to restore after a transient stream retry.
     retry_status_header: Option<String>,
     // Set when commentary output completes; once stream queues go idle we restore the status row.
@@ -1045,7 +1146,12 @@ impl ChatWidget {
         }
 
         self.bottom_pane.ensure_status_indicator();
-        self.set_status_header(self.current_status_header.clone());
+        self.set_status(
+            self.current_status.header.clone(),
+            self.current_status.details.clone(),
+            StatusDetailsCapitalization::Preserve,
+            self.current_status.details_max_lines,
+        );
         self.pending_status_indicator_restore = false;
     }
 
@@ -1059,9 +1165,28 @@ impl ChatWidget {
         details_capitalization: StatusDetailsCapitalization,
         details_max_lines: usize,
     ) {
-        self.current_status_header = header.clone();
-        self.bottom_pane
-            .update_status(header, details, details_capitalization, details_max_lines);
+        let details = details
+            .filter(|details| !details.is_empty())
+            .map(|details| {
+                let trimmed = details.trim_start();
+                match details_capitalization {
+                    StatusDetailsCapitalization::CapitalizeFirst => {
+                        crate::text_formatting::capitalize_first(trimmed)
+                    }
+                    StatusDetailsCapitalization::Preserve => trimmed.to_string(),
+                }
+            });
+        self.current_status = StatusIndicatorState {
+            header: header.clone(),
+            details: details.clone(),
+            details_max_lines,
+        };
+        self.bottom_pane.update_status(
+            header,
+            details,
+            StatusDetailsCapitalization::Preserve,
+            details_max_lines,
+        );
     }
 
     /// Convenience wrapper around [`Self::set_status`];
@@ -1078,6 +1203,14 @@ impl ChatWidget {
     /// Sets the currently rendered footer status-line value.
     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
         self.bottom_pane.set_status_line(status_line);
+    }
+
+    /// Forwards the contextual active-agent label into the bottom-pane footer pipeline.
+    ///
+    /// `ChatWidget` stays a pass-through here so `App` remains the owner of "which thread is the
+    /// user actually looking at?" and the footer stack remains a pure renderer of that decision.
+    pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
+        self.bottom_pane.set_active_agent_label(active_agent_label);
     }
 
     /// Recomputes footer status-line content from config and current runtime state.
@@ -1251,6 +1384,7 @@ impl ChatWidget {
             self.config.permissions.sandbox_policy =
                 Constrained::allow_only(event.sandbox_policy.clone());
         }
+        self.config.approvals_reviewer = event.approvals_reviewer;
         let initial_messages = event.initial_messages.clone();
         self.last_copyable_output = None;
         let forked_from_id = event.forked_from_id;
@@ -1270,7 +1404,7 @@ impl ChatWidget {
         self.sync_personality_command_enabled();
         self.refresh_plugin_mentions();
         let startup_tooltip_override = self.startup_tooltip_override.take();
-        let show_fast_status = self.should_show_fast_status(event.service_tier);
+        let show_fast_status = self.should_show_fast_status(&model_for_header, event.service_tier);
         let session_info_cell = history_cell::new_session_info(
             &self.config,
             &model_for_header,
@@ -1367,6 +1501,13 @@ impl ChatWidget {
         category: crate::app_event::FeedbackCategory,
         include_logs: bool,
     ) {
+        if let Some(chatgpt_user_id) = self
+            .auth_manager
+            .auth_cached()
+            .and_then(|auth| auth.get_chatgpt_user_id())
+        {
+            tracing::info!(target: "feedback_tags", chatgpt_user_id);
+        }
         let snapshot = self.feedback.snapshot(self.thread_id);
         self.show_feedback_note(category, include_logs, snapshot);
     }
@@ -1401,6 +1542,13 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_feedback_consent(&mut self, category: crate::app_event::FeedbackCategory) {
+        if let Some(chatgpt_user_id) = self
+            .auth_manager
+            .auth_cached()
+            .and_then(|auth| auth.get_chatgpt_user_id())
+        {
+            tracing::info!(target: "feedback_tags", chatgpt_user_id);
+        }
         let snapshot = self.feedback.snapshot(self.thread_id);
         let params = crate::bottom_pane::feedback_upload_consent_params(
             self.app_event_tx.clone(),
@@ -1450,6 +1598,7 @@ impl ChatWidget {
         if self.plan_stream_controller.is_none() {
             self.plan_stream_controller = Some(PlanStreamController::new(
                 self.last_rendered_width.get().map(|w| w.saturating_sub(4)),
+                &self.config.cwd,
             ));
         }
         if let Some(controller) = self.plan_stream_controller.as_mut()
@@ -1488,7 +1637,7 @@ impl ChatWidget {
             // TODO: Replace streamed output with the final plan item text if plan streaming is
             // removed or if we need to reconcile mismatches between streamed and final content.
         } else if !plan_text.is_empty() {
-            self.add_to_history(history_cell::new_proposed_plan(plan_text));
+            self.add_to_history(history_cell::new_proposed_plan(plan_text, &self.config.cwd));
         }
         if should_restore_after_stream {
             self.pending_status_indicator_restore = true;
@@ -1521,8 +1670,10 @@ impl ChatWidget {
         // At the end of a reasoning block, record transcript-only content.
         self.full_reasoning_buffer.push_str(&self.reasoning_buffer);
         if !self.full_reasoning_buffer.is_empty() {
-            let cell =
-                history_cell::new_reasoning_summary_block(self.full_reasoning_buffer.clone());
+            let cell = history_cell::new_reasoning_summary_block(
+                self.full_reasoning_buffer.clone(),
+                &self.config.cwd,
+            );
             self.add_boxed_history(cell);
         }
         self.reasoning_buffer.clear();
@@ -1730,7 +1881,7 @@ impl ChatWidget {
             },
             SelectionItem {
                 name: MULTI_AGENT_ENABLE_NO.to_string(),
-                description: Some("Keep multi-agent disabled.".to_string()),
+                description: Some("Keep subagents disabled.".to_string()),
                 dismiss_on_select: true,
                 ..Default::default()
             },
@@ -1738,7 +1889,7 @@ impl ChatWidget {
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: Some(MULTI_AGENT_ENABLE_TITLE.to_string()),
-            subtitle: Some("Multi-agent is currently disabled in your config.".to_string()),
+            subtitle: Some("Subagents are currently disabled in your config.".to_string()),
             footer_hint: Some(standard_popup_hint_line()),
             items,
             ..Default::default()
@@ -2218,6 +2369,226 @@ impl ChatWidget {
         );
     }
 
+    /// Handle guardian review lifecycle events for the current thread.
+    ///
+    /// In-progress assessments temporarily own the live status footer so the
+    /// user can see what is being reviewed, including parallel review
+    /// aggregation. Terminal assessments clear or update that footer state and
+    /// render the final approved/denied history cell when guardian returns a
+    /// decision.
+    fn on_guardian_assessment(&mut self, ev: GuardianAssessmentEvent) {
+        // Guardian emits a compact JSON action payload; map the stable fields we
+        // care about into a short footer/history summary without depending on
+        // the full raw JSON shape in the rest of the widget.
+        let guardian_action_summary = |action: &serde_json::Value| {
+            let tool = action.get("tool").and_then(serde_json::Value::as_str)?;
+            match tool {
+                "shell" | "exec_command" => match action.get("command") {
+                    Some(serde_json::Value::String(command)) => Some(command.clone()),
+                    Some(serde_json::Value::Array(command)) => {
+                        let args = command
+                            .iter()
+                            .map(serde_json::Value::as_str)
+                            .collect::<Option<Vec<_>>>()?;
+                        shlex::try_join(args.iter().copied())
+                            .ok()
+                            .or_else(|| Some(args.join(" ")))
+                    }
+                    _ => None,
+                },
+                "apply_patch" => {
+                    let files = action
+                        .get("files")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|files| {
+                            files
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let change_count = action
+                        .get("change_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(files.len() as u64);
+                    Some(if files.len() == 1 {
+                        format!("apply_patch touching {}", files[0])
+                    } else {
+                        format!(
+                            "apply_patch touching {change_count} changes across {} files",
+                            files.len()
+                        )
+                    })
+                }
+                "network_access" => action
+                    .get("target")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|target| format!("network access to {target}")),
+                "mcp_tool_call" => {
+                    let tool_name = action
+                        .get("tool_name")
+                        .and_then(serde_json::Value::as_str)?;
+                    let label = action
+                        .get("connector_name")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| action.get("server").and_then(serde_json::Value::as_str))
+                        .unwrap_or("unknown server");
+                    Some(format!("MCP {tool_name} on {label}"))
+                }
+                _ => None,
+            }
+        };
+        let guardian_command = |action: &serde_json::Value| match action.get("command") {
+            Some(serde_json::Value::Array(command)) => Some(
+                command
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>(),
+            )
+            .filter(|command| !command.is_empty()),
+            Some(serde_json::Value::String(command)) => shlex::split(command)
+                .filter(|command| !command.is_empty())
+                .or_else(|| Some(vec![command.clone()])),
+            _ => None,
+        };
+
+        if ev.status == GuardianAssessmentStatus::InProgress
+            && let Some(action) = ev.action.as_ref()
+            && let Some(detail) = guardian_action_summary(action)
+        {
+            // In-progress assessments own the live footer state while the
+            // review is pending. Parallel reviews are aggregated into one
+            // footer summary by `PendingGuardianReviewStatus`.
+            self.bottom_pane.ensure_status_indicator();
+            self.bottom_pane.set_interrupt_hint_visible(true);
+            self.pending_guardian_review_status
+                .start_or_update(ev.id.clone(), detail);
+            if let Some(status) = self.pending_guardian_review_status.status_indicator_state() {
+                self.set_status(
+                    status.header,
+                    status.details,
+                    StatusDetailsCapitalization::Preserve,
+                    status.details_max_lines,
+                );
+            }
+            self.request_redraw();
+            return;
+        }
+
+        // Terminal assessments remove the matching pending footer entry first,
+        // then render the final approved/denied history cell below.
+        if self.pending_guardian_review_status.finish(&ev.id) {
+            if let Some(status) = self.pending_guardian_review_status.status_indicator_state() {
+                self.set_status(
+                    status.header,
+                    status.details,
+                    StatusDetailsCapitalization::Preserve,
+                    status.details_max_lines,
+                );
+            } else if self.current_status.is_guardian_review() {
+                self.set_status_header(String::from("Working"));
+            }
+        } else if self.pending_guardian_review_status.is_empty()
+            && self.current_status.is_guardian_review()
+        {
+            self.set_status_header(String::from("Working"));
+        }
+
+        if ev.status == GuardianAssessmentStatus::Approved {
+            let Some(action) = ev.action else {
+                return;
+            };
+
+            let cell = if let Some(command) = guardian_command(&action) {
+                history_cell::new_approval_decision_cell(
+                    command,
+                    codex_protocol::protocol::ReviewDecision::Approved,
+                    history_cell::ApprovalDecisionActor::Guardian,
+                )
+            } else if let Some(summary) = guardian_action_summary(&action) {
+                history_cell::new_guardian_approved_action_request(summary)
+            } else {
+                let summary = serde_json::to_string(&action)
+                    .unwrap_or_else(|_| "<unrenderable guardian action>".to_string());
+                history_cell::new_guardian_approved_action_request(summary)
+            };
+
+            self.add_boxed_history(cell);
+            self.request_redraw();
+            return;
+        }
+
+        if ev.status != GuardianAssessmentStatus::Denied {
+            return;
+        }
+        let Some(action) = ev.action else {
+            return;
+        };
+
+        let tool = action.get("tool").and_then(serde_json::Value::as_str);
+        let cell = if let Some(command) = guardian_command(&action) {
+            history_cell::new_approval_decision_cell(
+                command,
+                codex_protocol::protocol::ReviewDecision::Denied,
+                history_cell::ApprovalDecisionActor::Guardian,
+            )
+        } else {
+            match tool {
+                Some("apply_patch") => {
+                    let files = action
+                        .get("files")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|files| {
+                            files
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .map(ToOwned::to_owned)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let change_count = action
+                        .get("change_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|count| usize::try_from(count).ok())
+                        .unwrap_or(files.len());
+                    history_cell::new_guardian_denied_patch_request(files, change_count)
+                }
+                Some("mcp_tool_call") => {
+                    let server = action
+                        .get("server")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown server");
+                    let tool_name = action
+                        .get("tool_name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown tool");
+                    history_cell::new_guardian_denied_action_request(format!(
+                        "codex to call MCP tool {server}.{tool_name}"
+                    ))
+                }
+                Some("network_access") => {
+                    let target = action
+                        .get("target")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| action.get("host").and_then(serde_json::Value::as_str))
+                        .unwrap_or("network target");
+                    history_cell::new_guardian_denied_action_request(format!(
+                        "codex to access {target}"
+                    ))
+                }
+                _ => {
+                    let summary = serde_json::to_string(&action)
+                        .unwrap_or_else(|_| "<unrenderable guardian action>".to_string());
+                    history_cell::new_guardian_denied_action_request(summary)
+                }
+            }
+        };
+
+        self.add_boxed_history(cell);
+        self.request_redraw();
+    }
+
     fn on_elicitation_request(&mut self, ev: ElicitationRequestEvent) {
         let ev2 = ev.clone();
         self.defer_or_handle(
@@ -2353,10 +2724,15 @@ impl ChatWidget {
 
     fn on_image_generation_end(&mut self, event: ImageGenerationEndEvent) {
         self.flush_answer_stream_with_separator();
+        let saved_to = event.saved_path.as_deref().and_then(|saved_path| {
+            std::path::Path::new(saved_path)
+                .parent()
+                .map(|parent| parent.display().to_string())
+        });
         self.add_to_history(history_cell::new_image_generation_call(
             event.call_id,
-            event.status,
             event.revised_prompt,
+            saved_to,
         ));
         self.request_redraw();
     }
@@ -2556,6 +2932,37 @@ impl ChatWidget {
         self.set_status_header(message);
     }
 
+    fn on_hook_started(&mut self, event: codex_protocol::protocol::HookStartedEvent) {
+        let label = hook_event_label(event.run.event_name);
+        let mut message = format!("Running {label} hook");
+        if let Some(status_message) = event.run.status_message
+            && !status_message.is_empty()
+        {
+            message.push_str(": ");
+            message.push_str(&status_message);
+        }
+        self.add_to_history(history_cell::new_info_event(message, None));
+        self.request_redraw();
+    }
+
+    fn on_hook_completed(&mut self, event: codex_protocol::protocol::HookCompletedEvent) {
+        let status = format!("{:?}", event.run.status).to_lowercase();
+        let header = format!("{} hook ({status})", hook_event_label(event.run.event_name));
+        let mut lines: Vec<ratatui::text::Line<'static>> = vec![header.into()];
+        for entry in event.run.entries {
+            let prefix = match entry.kind {
+                codex_protocol::protocol::HookOutputEntryKind::Warning => "warning: ",
+                codex_protocol::protocol::HookOutputEntryKind::Stop => "stop: ",
+                codex_protocol::protocol::HookOutputEntryKind::Feedback => "feedback: ",
+                codex_protocol::protocol::HookOutputEntryKind::Context => "hook context: ",
+                codex_protocol::protocol::HookOutputEntryKind::Error => "error: ",
+            };
+            lines.push(format!("  {prefix}{}", entry.text).into());
+        }
+        self.add_to_history(PlainHistoryCell::new(lines));
+        self.request_redraw();
+    }
+
     fn on_undo_started(&mut self, event: UndoStartedEvent) {
         self.bottom_pane.ensure_status_indicator();
         self.bottom_pane.set_interrupt_hint_visible(false);
@@ -2584,7 +2991,7 @@ impl ChatWidget {
 
     fn on_stream_error(&mut self, message: String, additional_details: Option<String>) {
         if self.retry_status_header.is_none() {
-            self.retry_status_header = Some(self.current_status_header.clone());
+            self.retry_status_header = Some(self.current_status.header.clone());
         }
         self.bottom_pane.ensure_status_indicator();
         self.set_status(
@@ -2726,6 +3133,7 @@ impl ChatWidget {
             }
             self.stream_controller = Some(StreamController::new(
                 self.last_rendered_width.get().map(|w| w.saturating_sub(2)),
+                &self.config.cwd,
             ));
         }
         if let Some(controller) = self.stream_controller.as_mut()
@@ -3191,6 +3599,7 @@ impl ChatWidget {
             plan_stream_controller: None,
             last_copyable_output: None,
             running_commands: HashMap::new(),
+            pending_collab_spawn_requests: HashMap::new(),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
             unified_exec_wait_streak: None,
@@ -3200,12 +3609,14 @@ impl ChatWidget {
             agent_turn_running: false,
             mcp_startup_status: None,
             connectors_cache: ConnectorsCacheState::default(),
+            connectors_partial_snapshot: None,
             connectors_prefetch_in_flight: false,
             connectors_force_refetch_pending: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
-            current_status_header: String::from("Working"),
+            current_status: StatusIndicatorState::working(),
+            pending_guardian_review_status: PendingGuardianReviewStatus::default(),
             retry_status_header: None,
             pending_status_indicator_restore: false,
             suppress_queue_autosend: false,
@@ -3279,7 +3690,7 @@ impl ChatWidget {
 
         widget
             .bottom_pane
-            .set_connectors_enabled(widget.config.features.enabled(Feature::Apps));
+            .set_connectors_enabled(widget.connectors_enabled());
 
         widget
     }
@@ -3374,6 +3785,7 @@ impl ChatWidget {
             plan_stream_controller: None,
             last_copyable_output: None,
             running_commands: HashMap::new(),
+            pending_collab_spawn_requests: HashMap::new(),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
             unified_exec_wait_streak: None,
@@ -3383,12 +3795,14 @@ impl ChatWidget {
             agent_turn_running: false,
             mcp_startup_status: None,
             connectors_cache: ConnectorsCacheState::default(),
+            connectors_partial_snapshot: None,
             connectors_prefetch_in_flight: false,
             connectors_force_refetch_pending: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
-            current_status_header: String::from("Working"),
+            current_status: StatusIndicatorState::working(),
+            pending_guardian_review_status: PendingGuardianReviewStatus::default(),
             retry_status_header: None,
             pending_status_indicator_restore: false,
             suppress_queue_autosend: false,
@@ -3452,7 +3866,7 @@ impl ChatWidget {
             .set_queued_message_edit_binding(widget.queued_message_edit_binding);
         widget
             .bottom_pane
-            .set_connectors_enabled(widget.config.features.enabled(Feature::Apps));
+            .set_connectors_enabled(widget.connectors_enabled());
 
         widget
     }
@@ -3549,6 +3963,7 @@ impl ChatWidget {
             plan_stream_controller: None,
             last_copyable_output: None,
             running_commands: HashMap::new(),
+            pending_collab_spawn_requests: HashMap::new(),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
             unified_exec_wait_streak: None,
@@ -3558,12 +3973,14 @@ impl ChatWidget {
             agent_turn_running: false,
             mcp_startup_status: None,
             connectors_cache: ConnectorsCacheState::default(),
+            connectors_partial_snapshot: None,
             connectors_prefetch_in_flight: false,
             connectors_force_refetch_pending: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
-            current_status_header: String::from("Working"),
+            current_status: StatusIndicatorState::working(),
+            pending_guardian_review_status: PendingGuardianReviewStatus::default(),
             retry_status_header: None,
             pending_status_indicator_restore: false,
             suppress_queue_autosend: false,
@@ -3636,7 +4053,7 @@ impl ChatWidget {
         widget.update_collaboration_mode_indicator();
         widget
             .bottom_pane
-            .set_connectors_enabled(widget.config.features.enabled(Feature::Apps));
+            .set_connectors_enabled(widget.connectors_enabled());
 
         widget
     }
@@ -3854,6 +4271,10 @@ impl ChatWidget {
     pub(crate) fn show_selection_view(&mut self, params: SelectionViewParams) {
         self.bottom_pane.show_selection_view(params);
         self.request_redraw();
+    }
+
+    pub(crate) fn no_modal_or_popup_active(&self) -> bool {
+        self.bottom_pane.no_modal_or_popup_active()
     }
 
     pub(crate) fn can_launch_external_editor(&self) -> bool {
@@ -4840,6 +5261,7 @@ impl ChatWidget {
                 self.on_rate_limit_snapshot(ev.rate_limits);
             }
             EventMsg::Warning(WarningEvent { message }) => self.on_warning(message),
+            EventMsg::GuardianAssessment(ev) => self.on_guardian_assessment(ev),
             EventMsg::ModelReroute(_) => {}
             EventMsg::Error(ErrorEvent {
                 message,
@@ -4944,8 +5366,24 @@ impl ChatWidget {
             }
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
             EventMsg::ContextCompacted(_) => self.on_agent_message("Context compacted".to_owned()),
-            EventMsg::CollabAgentSpawnBegin(_) => {}
-            EventMsg::CollabAgentSpawnEnd(ev) => self.on_collab_event(multi_agents::spawn_end(ev)),
+            EventMsg::CollabAgentSpawnBegin(CollabAgentSpawnBeginEvent {
+                call_id,
+                model,
+                reasoning_effort,
+                ..
+            }) => {
+                self.pending_collab_spawn_requests.insert(
+                    call_id,
+                    multi_agents::SpawnRequestSummary {
+                        model,
+                        reasoning_effort,
+                    },
+                );
+            }
+            EventMsg::CollabAgentSpawnEnd(ev) => {
+                let spawn_request = self.pending_collab_spawn_requests.remove(&ev.call_id);
+                self.on_collab_event(multi_agents::spawn_end(ev, spawn_request.as_ref()));
+            }
             EventMsg::CollabAgentInteractionBegin(_) => {}
             EventMsg::CollabAgentInteractionEnd(ev) => {
                 self.on_collab_event(multi_agents::interaction_end(ev))
@@ -4976,6 +5414,8 @@ impl ChatWidget {
             | EventMsg::ReasoningRawContentDelta(_)
             | EventMsg::DynamicToolCallRequest(_)
             | EventMsg::DynamicToolCallResponse(_) => {}
+            EventMsg::HookStarted(event) => self.on_hook_started(event),
+            EventMsg::HookCompleted(event) => self.on_hook_completed(event),
             EventMsg::RealtimeConversationStarted(ev) => {
                 if !from_replay {
                     self.on_realtime_conversation_started(ev);
@@ -5078,7 +5518,12 @@ impl ChatWidget {
                 } else {
                     // Show explanation when there are no structured findings.
                     let mut rendered: Vec<ratatui::text::Line<'static>> = vec!["".into()];
-                    append_markdown(&explanation, None, &mut rendered);
+                    append_markdown(
+                        &explanation,
+                        None,
+                        Some(self.config.cwd.as_path()),
+                        &mut rendered,
+                    );
                     let body_cell = AgentMessageCell::new(rendered, false);
                     self.app_event_tx
                         .send(AppEvent::InsertHistoryCell(Box::new(body_cell)));
@@ -5386,7 +5831,14 @@ impl ChatWidget {
             StatusLineItem::ModelWithReasoning => {
                 let label =
                     Self::status_line_reasoning_effort_label(self.effective_reasoning_effort());
-                Some(format!("{} {label}", self.model_display_name()))
+                let fast_label = if self
+                    .should_show_fast_status(self.current_model(), self.config.service_tier)
+                {
+                    " fast"
+                } else {
+                    ""
+                };
+                Some(format!("{} {label}{fast_label}", self.model_display_name()))
             }
             StatusLineItem::CurrentDir => {
                 Some(format_directory_display(self.status_line_cwd(), None))
@@ -5696,6 +6148,7 @@ impl ChatWidget {
             tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
                 cwd: None,
                 approval_policy: None,
+                approvals_reviewer: None,
                 sandbox_policy: None,
                 windows_sandbox_level: None,
                 model: Some(switch_model_for_events.clone()),
@@ -5817,6 +6270,7 @@ impl ChatWidget {
                     tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
                         cwd: None,
                         approval_policy: None,
+                        approvals_reviewer: None,
                         sandbox_policy: None,
                         model: None,
                         effort: None,
@@ -6023,7 +6477,7 @@ impl ChatWidget {
     fn model_menu_warning_line(&self) -> Option<Line<'static>> {
         let base_url = self.custom_openai_base_url()?;
         let warning = format!(
-            "Warning: OPENAI_BASE_URL is set to {base_url}. Selecting models may not be supported or work properly."
+            "Warning: OpenAI base URL is overridden to {base_url}. Selecting models may not be supported or work properly."
         );
         Some(Line::from(warning.red()))
     }
@@ -6568,6 +7022,8 @@ impl ChatWidget {
         let include_read_only = cfg!(target_os = "windows");
         let current_approval = self.config.permissions.approval_policy.value();
         let current_sandbox = self.config.permissions.sandbox_policy.get();
+        let guardian_approval_enabled = self.config.features.enabled(Feature::GuardianApproval);
+        let current_review_policy = self.config.approvals_reviewer;
         let mut items: Vec<SelectionItem> = Vec::new();
         let presets: Vec<ApprovalPreset> = builtin_approval_presets();
 
@@ -6583,19 +7039,28 @@ impl ChatWidget {
             && windows_degraded_sandbox_enabled
             && presets.iter().any(|preset| preset.id == "auto");
 
+        let guardian_disabled_reason = |enabled: bool| {
+            let mut next_features = self.config.features.get().clone();
+            next_features.set_enabled(Feature::GuardianApproval, enabled);
+            self.config
+                .features
+                .can_set(&next_features)
+                .err()
+                .map(|err| err.to_string())
+        };
+
         for preset in presets.into_iter() {
             if !include_read_only && preset.id == "read-only" {
                 continue;
             }
-            let is_current =
-                Self::preset_matches_current(current_approval, current_sandbox, &preset);
-            let name = if preset.id == "auto" && windows_degraded_sandbox_enabled {
+            let base_name = if preset.id == "auto" && windows_degraded_sandbox_enabled {
                 "Default (non-admin sandbox)".to_string()
             } else {
                 preset.label.to_string()
             };
-            let description = Some(preset.description.replace(" (Identical to Agent mode)", ""));
-            let disabled_reason = match self
+            let base_description =
+                Some(preset.description.replace(" (Identical to Agent mode)", ""));
+            let approval_disabled_reason = match self
                 .config
                 .permissions
                 .approval_policy
@@ -6604,13 +7069,16 @@ impl ChatWidget {
                 Ok(()) => None,
                 Err(err) => Some(err.to_string()),
             };
+            let default_disabled_reason = approval_disabled_reason
+                .clone()
+                .or_else(|| guardian_disabled_reason(false));
             let requires_confirmation = preset.id == "full-access"
                 && !self
                     .config
                     .notices
                     .hide_full_access_warning
                     .unwrap_or(false);
-            let actions: Vec<SelectionAction> = if requires_confirmation {
+            let default_actions: Vec<SelectionAction> = if requires_confirmation {
                 let preset_clone = preset.clone();
                 vec![Box::new(move |tx| {
                     tx.send(AppEvent::OpenFullAccessConfirmation {
@@ -6659,7 +7127,8 @@ impl ChatWidget {
                         Self::approval_preset_actions(
                             preset.approval,
                             preset.sandbox.clone(),
-                            name.clone(),
+                            base_name.clone(),
+                            ApprovalsReviewer::User,
                         )
                     }
                 }
@@ -6668,21 +7137,70 @@ impl ChatWidget {
                     Self::approval_preset_actions(
                         preset.approval,
                         preset.sandbox.clone(),
-                        name.clone(),
+                        base_name.clone(),
+                        ApprovalsReviewer::User,
                     )
                 }
             } else {
-                Self::approval_preset_actions(preset.approval, preset.sandbox.clone(), name.clone())
+                Self::approval_preset_actions(
+                    preset.approval,
+                    preset.sandbox.clone(),
+                    base_name.clone(),
+                    ApprovalsReviewer::User,
+                )
             };
-            items.push(SelectionItem {
-                name,
-                description,
-                is_current,
-                actions,
-                dismiss_on_select: true,
-                disabled_reason,
-                ..Default::default()
-            });
+            if preset.id == "auto" {
+                items.push(SelectionItem {
+                    name: base_name.clone(),
+                    description: base_description.clone(),
+                    is_current: current_review_policy == ApprovalsReviewer::User
+                        && Self::preset_matches_current(current_approval, current_sandbox, &preset),
+                    actions: default_actions,
+                    dismiss_on_select: true,
+                    disabled_reason: default_disabled_reason,
+                    ..Default::default()
+                });
+
+                if guardian_approval_enabled {
+                    items.push(SelectionItem {
+                        name: "Smart Approvals".to_string(),
+                        description: Some(
+                            "Same workspace-write permissions as Default, but eligible `on-request` approvals are routed through the guardian reviewer subagent."
+                                .to_string(),
+                        ),
+                        is_current: current_review_policy == ApprovalsReviewer::GuardianSubagent
+                            && Self::preset_matches_current(
+                                current_approval,
+                                current_sandbox,
+                                &preset,
+                            ),
+                        actions: Self::approval_preset_actions(
+                            preset.approval,
+                            preset.sandbox.clone(),
+                            "Smart Approvals".to_string(),
+                            ApprovalsReviewer::GuardianSubagent,
+                        ),
+                        dismiss_on_select: true,
+                        disabled_reason: approval_disabled_reason
+                            .or_else(|| guardian_disabled_reason(true)),
+                        ..Default::default()
+                    });
+                }
+            } else {
+                items.push(SelectionItem {
+                    name: base_name,
+                    description: base_description,
+                    is_current: Self::preset_matches_current(
+                        current_approval,
+                        current_sandbox,
+                        &preset,
+                    ),
+                    actions: default_actions,
+                    dismiss_on_select: true,
+                    disabled_reason: default_disabled_reason,
+                    ..Default::default()
+                });
+            }
         }
 
         let footer_note = show_elevate_sandbox_hint.then(|| {
@@ -6727,12 +7245,14 @@ impl ChatWidget {
         approval: AskForApproval,
         sandbox: SandboxPolicy,
         label: String,
+        approvals_reviewer: ApprovalsReviewer,
     ) -> Vec<SelectionAction> {
         vec![Box::new(move |tx| {
             let sandbox_clone = sandbox.clone();
             tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
                 cwd: None,
                 approval_policy: Some(approval),
+                approvals_reviewer: Some(approvals_reviewer),
                 sandbox_policy: Some(sandbox_clone.clone()),
                 windows_sandbox_level: None,
                 model: None,
@@ -6744,6 +7264,7 @@ impl ChatWidget {
             }));
             tx.send(AppEvent::UpdateAskForApprovalPolicy(approval));
             tx.send(AppEvent::UpdateSandboxPolicy(sandbox_clone));
+            tx.send(AppEvent::UpdateApprovalsReviewer(approvals_reviewer));
             tx.send(AppEvent::InsertHistoryCell(Box::new(
                 history_cell::new_info_event(format!("Permissions updated to {label}"), None),
             )));
@@ -6755,7 +7276,34 @@ impl ChatWidget {
         current_sandbox: &SandboxPolicy,
         preset: &ApprovalPreset,
     ) -> bool {
-        current_approval == preset.approval && *current_sandbox == preset.sandbox
+        if current_approval != preset.approval {
+            return false;
+        }
+
+        match (current_sandbox, &preset.sandbox) {
+            (SandboxPolicy::DangerFullAccess, SandboxPolicy::DangerFullAccess) => true,
+            (
+                SandboxPolicy::ReadOnly {
+                    network_access: current_network_access,
+                    ..
+                },
+                SandboxPolicy::ReadOnly {
+                    network_access: preset_network_access,
+                    ..
+                },
+            ) => current_network_access == preset_network_access,
+            (
+                SandboxPolicy::WorkspaceWrite {
+                    network_access: current_network_access,
+                    ..
+                },
+                SandboxPolicy::WorkspaceWrite {
+                    network_access: preset_network_access,
+                    ..
+                },
+            ) => current_network_access == preset_network_access,
+            _ => false,
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -6810,14 +7358,22 @@ impl ChatWidget {
         ));
         let header = ColumnRenderable::with(header_children);
 
-        let mut accept_actions =
-            Self::approval_preset_actions(approval, sandbox.clone(), selected_name.clone());
+        let mut accept_actions = Self::approval_preset_actions(
+            approval,
+            sandbox.clone(),
+            selected_name.clone(),
+            ApprovalsReviewer::User,
+        );
         accept_actions.push(Box::new(|tx| {
             tx.send(AppEvent::UpdateFullAccessWarningAcknowledged(true));
         }));
 
-        let mut accept_and_remember_actions =
-            Self::approval_preset_actions(approval, sandbox, selected_name);
+        let mut accept_and_remember_actions = Self::approval_preset_actions(
+            approval,
+            sandbox,
+            selected_name,
+            ApprovalsReviewer::User,
+        );
         accept_and_remember_actions.push(Box::new(|tx| {
             tx.send(AppEvent::UpdateFullAccessWarningAcknowledged(true));
             tx.send(AppEvent::PersistFullAccessWarningAcknowledged);
@@ -6931,6 +7487,7 @@ impl ChatWidget {
                 approval,
                 sandbox,
                 mode_label.to_string(),
+                ApprovalsReviewer::User,
             ));
         }
 
@@ -6944,6 +7501,7 @@ impl ChatWidget {
                 approval,
                 sandbox,
                 mode_label.to_string(),
+                ApprovalsReviewer::User,
             ));
         }
 
@@ -7307,6 +7865,10 @@ impl ChatWidget {
         enabled
     }
 
+    pub(crate) fn set_approvals_reviewer(&mut self, policy: ApprovalsReviewer) {
+        self.config.approvals_reviewer = policy;
+    }
+
     pub(crate) fn set_full_access_warning_acknowledged(&mut self, acknowledged: bool) {
         self.config.notices.hide_full_access_warning = Some(acknowledged);
     }
@@ -7375,8 +7937,13 @@ impl ChatWidget {
         self.config.service_tier
     }
 
-    pub(crate) fn should_show_fast_status(&self, service_tier: Option<ServiceTier>) -> bool {
-        matches!(service_tier, Some(ServiceTier::Fast))
+    pub(crate) fn should_show_fast_status(
+        &self,
+        model: &str,
+        service_tier: Option<ServiceTier>,
+    ) -> bool {
+        model == FAST_STATUS_MODEL
+            && matches!(service_tier, Some(ServiceTier::Fast))
             && self
                 .auth_manager
                 .auth_cached()
@@ -7423,6 +7990,7 @@ impl ChatWidget {
             .send(AppEvent::CodexOp(Op::OverrideTurnContext {
                 cwd: None,
                 approval_policy: None,
+                approvals_reviewer: None,
                 sandbox_policy: None,
                 windows_sandbox_level: None,
                 model: None,
@@ -7697,12 +8265,18 @@ impl ChatWidget {
     }
 
     fn connectors_enabled(&self) -> bool {
-        self.config.features.enabled(Feature::Apps)
+        self.config
+            .features
+            .apps_enabled_cached(Some(self.auth_manager.as_ref()))
     }
 
     fn connectors_for_mentions(&self) -> Option<&[connectors::AppInfo]> {
         if !self.connectors_enabled() {
             return None;
+        }
+
+        if let Some(snapshot) = &self.connectors_partial_snapshot {
+            return Some(snapshot.connectors.as_slice());
         }
 
         match &self.connectors_cache {
@@ -7810,7 +8384,9 @@ impl ChatWidget {
         }
 
         let connectors_cache = self.connectors_cache.clone();
-        self.prefetch_connectors_with_options(true);
+        let should_force_refetch = !self.connectors_prefetch_in_flight
+            || matches!(connectors_cache, ConnectorsCacheState::Ready(_));
+        self.prefetch_connectors_with_options(should_force_refetch);
 
         match connectors_cache {
             ConnectorsCacheState::Ready(snapshot) => {
@@ -7823,28 +8399,51 @@ impl ChatWidget {
             ConnectorsCacheState::Failed(err) => {
                 self.add_to_history(history_cell::new_error_event(err));
             }
-            ConnectorsCacheState::Loading => {
-                self.add_to_history(history_cell::new_info_event(
-                    "Apps are still loading.".to_string(),
-                    Some("Try again in a moment.".to_string()),
-                ));
-            }
-            ConnectorsCacheState::Uninitialized => {
-                self.add_to_history(history_cell::new_info_event(
-                    "Apps are still loading.".to_string(),
-                    Some("Try again in a moment.".to_string()),
-                ));
+            ConnectorsCacheState::Loading | ConnectorsCacheState::Uninitialized => {
+                self.open_connectors_loading_popup();
             }
         }
         self.request_redraw();
     }
 
-    fn open_connectors_popup(&mut self, connectors: &[connectors::AppInfo]) {
-        self.bottom_pane
-            .show_selection_view(self.connectors_popup_params(connectors));
+    fn open_connectors_loading_popup(&mut self) {
+        if !self.bottom_pane.replace_selection_view_if_active(
+            CONNECTORS_SELECTION_VIEW_ID,
+            self.connectors_loading_popup_params(),
+        ) {
+            self.bottom_pane
+                .show_selection_view(self.connectors_loading_popup_params());
+        }
     }
 
-    fn connectors_popup_params(&self, connectors: &[connectors::AppInfo]) -> SelectionViewParams {
+    fn open_connectors_popup(&mut self, connectors: &[connectors::AppInfo]) {
+        self.bottom_pane
+            .show_selection_view(self.connectors_popup_params(connectors, None));
+    }
+
+    fn connectors_loading_popup_params(&self) -> SelectionViewParams {
+        let mut header = ColumnRenderable::new();
+        header.push(Line::from("Apps".bold()));
+        header.push(Line::from("Loading installed and available apps...".dim()));
+
+        SelectionViewParams {
+            view_id: Some(CONNECTORS_SELECTION_VIEW_ID),
+            header: Box::new(header),
+            items: vec![SelectionItem {
+                name: "Loading apps...".to_string(),
+                description: Some("This updates when the full list is ready.".to_string()),
+                is_disabled: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn connectors_popup_params(
+        &self,
+        connectors: &[connectors::AppInfo],
+        selected_connector_id: Option<&str>,
+    ) -> SelectionViewParams {
         let total = connectors.len();
         let installed = connectors
             .iter()
@@ -7858,6 +8457,11 @@ impl ChatWidget {
         header.push(Line::from(
             format!("Installed {installed} of {total} available apps.").dim(),
         ));
+        let initial_selected_idx = selected_connector_id.and_then(|selected_connector_id| {
+            connectors
+                .iter()
+                .position(|connector| connector.id == selected_connector_id)
+        });
         let mut items: Vec<SelectionItem> = Vec::with_capacity(connectors.len());
         for connector in connectors {
             let connector_label = connectors::connector_display_label(connector);
@@ -7926,14 +8530,28 @@ impl ChatWidget {
             is_searchable: true,
             search_placeholder: Some("Type to search apps".to_string()),
             col_width_mode: ColumnWidthMode::AutoAllRows,
+            initial_selected_idx,
             ..Default::default()
         }
     }
 
     fn refresh_connectors_popup_if_open(&mut self, connectors: &[connectors::AppInfo]) {
+        let selected_connector_id =
+            if let (Some(selected_index), ConnectorsCacheState::Ready(snapshot)) = (
+                self.bottom_pane
+                    .selected_index_for_active_view(CONNECTORS_SELECTION_VIEW_ID),
+                &self.connectors_cache,
+            ) {
+                snapshot
+                    .connectors
+                    .get(selected_index)
+                    .map(|connector| connector.id.as_str())
+            } else {
+                None
+            };
         let _ = self.bottom_pane.replace_selection_view_if_active(
             CONNECTORS_SELECTION_VIEW_ID,
-            self.connectors_popup_params(connectors),
+            self.connectors_popup_params(connectors, selected_connector_id),
         );
     }
 
@@ -8258,15 +8876,28 @@ impl ChatWidget {
                         }
                     }
                 }
-                self.refresh_connectors_popup_if_open(&snapshot.connectors);
-                if is_final || !matches!(self.connectors_cache, ConnectorsCacheState::Ready(_)) {
+                if is_final {
+                    self.connectors_partial_snapshot = None;
+                    self.refresh_connectors_popup_if_open(&snapshot.connectors);
                     self.connectors_cache = ConnectorsCacheState::Ready(snapshot.clone());
+                } else {
+                    self.connectors_partial_snapshot = Some(snapshot.clone());
                 }
                 self.bottom_pane.set_connectors_snapshot(Some(snapshot));
             }
             Err(err) => {
-                if matches!(self.connectors_cache, ConnectorsCacheState::Ready(_)) {
+                let partial_snapshot = self.connectors_partial_snapshot.take();
+                if let ConnectorsCacheState::Ready(snapshot) = &self.connectors_cache {
                     warn!("failed to refresh apps list; retaining current apps snapshot: {err}");
+                    self.bottom_pane
+                        .set_connectors_snapshot(Some(snapshot.clone()));
+                } else if let Some(snapshot) = partial_snapshot {
+                    warn!(
+                        "failed to load full apps list; falling back to installed apps snapshot: {err}"
+                    );
+                    self.refresh_connectors_popup_if_open(&snapshot.connectors);
+                    self.connectors_cache = ConnectorsCacheState::Ready(snapshot.clone());
+                    self.bottom_pane.set_connectors_snapshot(Some(snapshot));
                 } else {
                     self.connectors_cache = ConnectorsCacheState::Failed(err);
                     self.bottom_pane.set_connectors_snapshot(None);
@@ -8778,6 +9409,13 @@ fn extract_first_bold(s: &str) -> Option<String> {
         i += 1;
     }
     None
+}
+
+fn hook_event_label(event_name: codex_protocol::protocol::HookEventName) -> &'static str {
+    match event_name {
+        codex_protocol::protocol::HookEventName::SessionStart => "SessionStart",
+        codex_protocol::protocol::HookEventName::Stop => "Stop",
+    }
 }
 
 async fn fetch_rate_limits(base_url: String, auth: CodexAuth) -> Vec<RateLimitSnapshot> {
