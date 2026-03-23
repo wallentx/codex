@@ -312,7 +312,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="$(python3 "${GITHUB_WORKSPACE}/.github/scripts/rusty_v8_bazel.py" resolved-v8-crate-version)"
+          version=""
+          is_v8=0
+          while IFS= read -r line; do
+            if [[ "${line}" == "[[package]]" ]]; then
+              is_v8=0
+              continue
+            fi
+
+            if [[ "${line}" == 'name = "v8"' ]]; then
+              is_v8=1
+              continue
+            fi
+
+            if [[ ${is_v8} -eq 1 && "${line}" == version\ =\ * ]]; then
+              version="${line#version = \"}"
+              version="${version%\"}"
+              break
+            fi
+          done < Cargo.lock
+
+          if [[ -z "${version}" ]]; then
+            echo "Unable to resolve v8 version from Cargo.lock" >&2
+            exit 1
+          fi
           base_url="https://github.com/wallentx/rusty_v8/releases/download/v${version}"
           archive="${base_url}/librusty_v8_release_${TARGET}.a.gz"
           binding_dir="${RUNNER_TEMP}/rusty_v8"
