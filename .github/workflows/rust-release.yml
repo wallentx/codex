@@ -396,6 +396,7 @@ jobs:
           set -euo pipefail
 
           if [[ "${{ matrix.target }}" == 'aarch64-linux-android' ]]; then
+            export V8_FROM_SOURCE=1
             export CARGO_BUILD_JOBS=2
             export CARGO_PROFILE_RELEASE_LTO=thin
             export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8
