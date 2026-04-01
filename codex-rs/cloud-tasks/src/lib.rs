@@ -40,6 +40,7 @@ struct BackendContext {
 }
 
 async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext> {
+    #[cfg(debug_assertions)]
     let use_mock = matches!(
         std::env::var("CODEX_CLOUD_TASKS_MODE").ok().as_deref(),
         Some("mock") | Some("MOCK")
@@ -49,9 +50,10 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
 
     set_user_agent_suffix(user_agent_suffix);
 
+    #[cfg(debug_assertions)]
     if use_mock {
         return Ok(BackendContext {
-            backend: Arc::new(codex_cloud_tasks_client::MockClient),
+            backend: Arc::new(codex_cloud_tasks_mock_client::MockClient),
             base_url,
         });
     }
@@ -931,7 +933,7 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
                     if page.composer.flush_paste_burst_if_due() { needs_redraw = true; }
                     if page.composer.is_in_paste_burst() {
                         let _ = frame_tx
-                            .send(Instant::now() + codex_tui_app_server::ComposerInput::recommended_flush_delay());
+                            .send(Instant::now() + codex_tui::ComposerInput::recommended_flush_delay());
                     }
                 }
                 // Keep spinner pulsing only while loading.
@@ -1492,7 +1494,7 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
                                 _ => {
                                     if page.submitting {
                                         // Ignore input while submitting
-                                    } else if let codex_tui_app_server::ComposerAction::Submitted(text) =
+                                    } else if let codex_tui::ComposerAction::Submitted(text) =
                                         page.composer.input(key)
                                     {
                                             // Submit only if we have an env id
@@ -1526,7 +1528,7 @@ pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> an
                                     if page.composer.is_in_paste_burst() {
                                         let _ = frame_tx.send(
                                             Instant::now()
-                                                + codex_tui_app_server::ComposerInput::recommended_flush_delay(),
+                                                + codex_tui::ComposerInput::recommended_flush_delay(),
                                         );
                                     }
                                     // Always schedule an immediate redraw for key edits in the composer.
@@ -2132,12 +2134,12 @@ mod tests {
     use super::*;
     use crate::resolve_git_ref_with_git_info;
     use codex_cloud_tasks_client::DiffSummary;
-    use codex_cloud_tasks_client::MockClient;
     use codex_cloud_tasks_client::TaskId;
     use codex_cloud_tasks_client::TaskStatus;
     use codex_cloud_tasks_client::TaskSummary;
-    use codex_tui_app_server::ComposerAction;
-    use codex_tui_app_server::ComposerInput;
+    use codex_cloud_tasks_mock_client::MockClient;
+    use codex_tui::ComposerAction;
+    use codex_tui::ComposerInput;
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
