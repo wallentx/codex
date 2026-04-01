@@ -149,6 +149,7 @@ crate.from_cargo(
     cargo_lock = "//codex-rs:Cargo.lock",
     cargo_toml = "//codex-rs:Cargo.toml",
     platform_triples = [
+        "aarch64-linux-android",
         "aarch64-unknown-linux-gnu",
         "aarch64-unknown-linux-musl",
         "aarch64-apple-darwin",
@@ -348,91 +349,107 @@ archive_override(
 )
 
 http_archive(
-    name = "v8_crate_146_4_0",
+    name = "v8_crate_146_9_0",
     build_file = "//third_party/v8:v8_crate.BUILD.bazel",
-    sha256 = "d97bcac5cdc5a195a4813f1855a6bc658f240452aac36caa12fd6c6f16026ab1",
-    strip_prefix = "v8-146.4.0",
+    sha256 = "59b21777080203cb33828681f177e53402fa2927a1e2d17adead072b0c26b401",
+    strip_prefix = "v8-146.9.0",
     type = "tar.gz",
-    urls = ["https://static.crates.io/crates/v8/v8-146.4.0.crate"],
+    urls = ["https://static.crates.io/crates/v8/v8-146.9.0.crate"],
 )
 
 http_file(
-    name = "rusty_v8_146_4_0_aarch64_apple_darwin_archive",
+    name = "rusty_v8_146_9_0_aarch64_apple_darwin_archive",
     downloaded_file_path = "librusty_v8_release_aarch64-apple-darwin.a.gz",
     urls = [
-        "https://github.com/denoland/rusty_v8/releases/download/v146.4.0/librusty_v8_release_aarch64-apple-darwin.a.gz",
+        "https://github.com/denoland/rusty_v8/releases/download/v146.9.0/librusty_v8_release_aarch64-apple-darwin.a.gz",
     ],
 )
 
 http_file(
-    name = "rusty_v8_146_4_0_aarch64_unknown_linux_gnu_archive",
+    name = "rusty_v8_146_9_0_aarch64_unknown_linux_gnu_archive",
     downloaded_file_path = "librusty_v8_release_aarch64-unknown-linux-gnu.a.gz",
     urls = [
-        "https://github.com/denoland/rusty_v8/releases/download/v146.4.0/librusty_v8_release_aarch64-unknown-linux-gnu.a.gz",
+        "https://github.com/denoland/rusty_v8/releases/download/v146.9.0/librusty_v8_release_aarch64-unknown-linux-gnu.a.gz",
     ],
 )
 
 http_file(
-    name = "rusty_v8_146_4_0_aarch64_pc_windows_msvc_archive",
+    name = "rusty_v8_146_9_0_aarch64_linux_android_archive",
+    downloaded_file_path = "librusty_v8_release_aarch64-linux-android.a.gz",
+    urls = [
+        "https://github.com/wallentx/rusty_v8/releases/download/v146.9.0/librusty_v8_release_aarch64-linux-android.a.gz",
+    ],
+)
+
+http_file(
+    name = "rusty_v8_146_9_0_aarch64_linux_android_binding",
+    downloaded_file_path = "src_binding_release_aarch64-linux-android.rs",
+    urls = [
+        "https://github.com/wallentx/rusty_v8/releases/download/v146.9.0/src_binding_release_aarch64-linux-android.rs",
+    ],
+)
+
+http_file(
+    name = "rusty_v8_146_9_0_aarch64_pc_windows_msvc_archive",
     downloaded_file_path = "rusty_v8_release_aarch64-pc-windows-msvc.lib.gz",
     urls = [
-        "https://github.com/denoland/rusty_v8/releases/download/v146.4.0/rusty_v8_release_aarch64-pc-windows-msvc.lib.gz",
+        "https://github.com/denoland/rusty_v8/releases/download/v146.9.0/rusty_v8_release_aarch64-pc-windows-msvc.lib.gz",
     ],
 )
 
 http_file(
-    name = "rusty_v8_146_4_0_x86_64_apple_darwin_archive",
+    name = "rusty_v8_146_9_0_x86_64_apple_darwin_archive",
     downloaded_file_path = "librusty_v8_release_x86_64-apple-darwin.a.gz",
     urls = [
-        "https://github.com/denoland/rusty_v8/releases/download/v146.4.0/librusty_v8_release_x86_64-apple-darwin.a.gz",
+        "https://github.com/denoland/rusty_v8/releases/download/v146.9.0/librusty_v8_release_x86_64-apple-darwin.a.gz",
     ],
 )
 
 http_file(
-    name = "rusty_v8_146_4_0_x86_64_unknown_linux_gnu_archive",
+    name = "rusty_v8_146_9_0_x86_64_unknown_linux_gnu_archive",
     downloaded_file_path = "librusty_v8_release_x86_64-unknown-linux-gnu.a.gz",
     urls = [
-        "https://github.com/denoland/rusty_v8/releases/download/v146.4.0/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz",
+        "https://github.com/denoland/rusty_v8/releases/download/v146.9.0/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz",
     ],
 )
 
 http_file(
-    name = "rusty_v8_146_4_0_x86_64_pc_windows_msvc_archive",
+    name = "rusty_v8_146_9_0_x86_64_pc_windows_msvc_archive",
     downloaded_file_path = "rusty_v8_release_x86_64-pc-windows-msvc.lib.gz",
     urls = [
-        "https://github.com/denoland/rusty_v8/releases/download/v146.4.0/rusty_v8_release_x86_64-pc-windows-msvc.lib.gz",
+        "https://github.com/denoland/rusty_v8/releases/download/v146.9.0/rusty_v8_release_x86_64-pc-windows-msvc.lib.gz",
     ],
 )
 
 http_file(
-    name = "rusty_v8_146_4_0_aarch64_unknown_linux_musl_archive",
+    name = "rusty_v8_146_9_0_aarch64_unknown_linux_musl_archive",
     downloaded_file_path = "librusty_v8_release_aarch64-unknown-linux-musl.a.gz",
     urls = [
-        "https://github.com/openai/codex/releases/download/rusty-v8-v146.4.0/librusty_v8_release_aarch64-unknown-linux-musl.a.gz",
+        "https://github.com/openai/codex/releases/download/rusty-v8-v146.9.0/librusty_v8_release_aarch64-unknown-linux-musl.a.gz",
     ],
 )
 
 http_file(
-    name = "rusty_v8_146_4_0_aarch64_unknown_linux_musl_binding",
+    name = "rusty_v8_146_9_0_aarch64_unknown_linux_musl_binding",
     downloaded_file_path = "src_binding_release_aarch64-unknown-linux-musl.rs",
     urls = [
-        "https://github.com/openai/codex/releases/download/rusty-v8-v146.4.0/src_binding_release_aarch64-unknown-linux-musl.rs",
+        "https://github.com/openai/codex/releases/download/rusty-v8-v146.9.0/src_binding_release_aarch64-unknown-linux-musl.rs",
     ],
 )
 
 http_file(
-    name = "rusty_v8_146_4_0_x86_64_unknown_linux_musl_archive",
+    name = "rusty_v8_146_9_0_x86_64_unknown_linux_musl_archive",
     downloaded_file_path = "librusty_v8_release_x86_64-unknown-linux-musl.a.gz",
     urls = [
-        "https://github.com/openai/codex/releases/download/rusty-v8-v146.4.0/librusty_v8_release_x86_64-unknown-linux-musl.a.gz",
+        "https://github.com/openai/codex/releases/download/rusty-v8-v146.9.0/librusty_v8_release_x86_64-unknown-linux-musl.a.gz",
     ],
 )
 
 http_file(
-    name = "rusty_v8_146_4_0_x86_64_unknown_linux_musl_binding",
+    name = "rusty_v8_146_9_0_x86_64_unknown_linux_musl_binding",
     downloaded_file_path = "src_binding_release_x86_64-unknown-linux-musl.rs",
     urls = [
-        "https://github.com/openai/codex/releases/download/rusty-v8-v146.4.0/src_binding_release_x86_64-unknown-linux-musl.rs",
+        "https://github.com/openai/codex/releases/download/rusty-v8-v146.9.0/src_binding_release_x86_64-unknown-linux-musl.rs",
     ],
 )
 
