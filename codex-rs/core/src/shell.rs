@@ -197,7 +197,7 @@ fn get_shell_path(
     None
 }
 
-const ZSH_FALLBACK_PATHS: &[&str] = &["/bin/zsh"];
+const ZSH_FALLBACK_PATHS: &[&str] = &["/data/data/com.termux/files/usr/bin/zsh", "/bin/zsh"];
 
 fn get_zsh_shell(path: Option<&PathBuf>) -> Option<Shell> {
     let shell_path = get_shell_path(ShellType::Zsh, path, "zsh", ZSH_FALLBACK_PATHS);
@@ -209,7 +209,7 @@ fn get_zsh_shell(path: Option<&PathBuf>) -> Option<Shell> {
     })
 }
 
-const BASH_FALLBACK_PATHS: &[&str] = &["/bin/bash"];
+const BASH_FALLBACK_PATHS: &[&str] = &["/data/data/com.termux/files/usr/bin/bash", "/bin/bash"];
 
 fn get_bash_shell(path: Option<&PathBuf>) -> Option<Shell> {
     let shell_path = get_shell_path(ShellType::Bash, path, "bash", BASH_FALLBACK_PATHS);
@@ -221,7 +221,11 @@ fn get_bash_shell(path: Option<&PathBuf>) -> Option<Shell> {
     })
 }
 
-const SH_FALLBACK_PATHS: &[&str] = &["/bin/sh"];
+const SH_FALLBACK_PATHS: &[&str] = &[
+    "/data/data/com.termux/files/usr/bin/sh",
+    "/system/bin/sh",
+    "/bin/sh",
+];
 
 fn get_sh_shell(path: Option<&PathBuf>) -> Option<Shell> {
     let shell_path = get_shell_path(ShellType::Sh, path, "sh", SH_FALLBACK_PATHS);

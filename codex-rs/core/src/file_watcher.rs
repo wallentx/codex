@@ -270,6 +270,11 @@ impl FileWatcher {
     /// Creates a live filesystem watcher and starts its background event loop
     /// on the current Tokio runtime.
     pub fn new() -> notify::Result<Self> {
+        #[cfg(target_os = "android")]
+        {
+            return Ok(Self::noop());
+        }
+
         let (raw_tx, raw_rx) = mpsc::unbounded_channel();
         let raw_tx_clone = raw_tx;
         let watcher = notify::recommended_watcher(move |res| {

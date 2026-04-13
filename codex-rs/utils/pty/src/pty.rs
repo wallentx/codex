@@ -22,7 +22,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use portable_pty::CommandBuilder;
-#[cfg(not(windows))]
+use portable_pty::PtySize;
+#[cfg(all(not(windows), not(target_os = "android")))]
 use portable_pty::native_pty_system;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -41,10 +42,10 @@ pub fn conpty_supported() -> bool {
     crate::win::conpty_supported()
 }
 
-/// Returns true when ConPTY support is available (non-Windows always true).
+/// Returns true when ConPTY support is available (non-Windows).
 #[cfg(not(windows))]
 pub fn conpty_supported() -> bool {
-    true
+    !cfg!(target_os = "android")
 }
 
 struct PtyChildTerminator {
@@ -86,15 +87,30 @@ impl ChildTerminator for RawPidTerminator {
     }
 }
 
+#[cfg(target_os = "android")]
+struct AndroidPtySystem;
+
+#[cfg(target_os = "android")]
+impl portable_pty::PtySystem for AndroidPtySystem {
+    fn openpty(&self, _size: PtySize) -> anyhow::Result<portable_pty::PtyPair> {
+        anyhow::bail!("PTY is not supported on Android")
+    }
+}
+
 fn platform_native_pty_system() -> Box<dyn portable_pty::PtySystem + Send> {
     #[cfg(windows)]
     {
         Box::new(crate::win::ConPtySystem::default())
     }
 
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "android")))]
     {
         native_pty_system()
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        Box::new(AndroidPtySystem)
     }
 }
 

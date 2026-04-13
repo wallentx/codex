@@ -150,7 +150,9 @@ pub async fn append_entry(text: &str, conversation_id: &ThreadId, config: &Confi
                 Err(std::fs::TryLockError::WouldBlock) => {
                     std::thread::sleep(RETRY_SLEEP);
                 }
-                Err(std::fs::TryLockError::Error(err)) if err.kind() == std::io::ErrorKind::Unsupported => {
+                Err(std::fs::TryLockError::Error(err))
+                    if err.kind() == std::io::ErrorKind::Unsupported =>
+                {
                     history_file.seek(SeekFrom::End(0))?;
                     history_file.write_all(line.as_bytes())?;
                     history_file.flush()?;
@@ -391,7 +393,9 @@ fn lookup_history_entry(path: &Path, log_id: u64, offset: usize) -> Option<Histo
                 // Not found at requested offset.
                 return None;
             }
-            Err(std::fs::TryLockError::Error(err)) if err.kind() == std::io::ErrorKind::Unsupported => {
+            Err(std::fs::TryLockError::Error(err))
+                if err.kind() == std::io::ErrorKind::Unsupported =>
+            {
                 let reader = BufReader::new(&file);
                 for (idx, line_res) in reader.lines().enumerate() {
                     let line = match line_res {
