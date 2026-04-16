@@ -484,10 +484,11 @@ jobs:
             binary_path="target/${{ matrix.target }}/release/${binary}"
             if [[ -f "${binary_path}" ]]; then
               termux-elf-cleaner --api-level 24 "${binary_path}"
-              if [[ "${binary}" == "codex" ]]; then
-                # Patch PT_TLS (0x7) to PT_NULL (0x0) at offset 400 to bypass Bionic alignment checks.
-                printf '\x00\x00\x00\x00' | dd of="${binary_path}" bs=1 seek=400 count=4 conv=notrunc
-              fi
+              chmod +x "${binary_path}"
+              # if [[ "${binary}" == "codex" ]]; then
+              #   # Patch PT_TLS (0x7) to PT_NULL (0x0) at offset 400 to bypass Bionic alignment checks.
+              #   printf '\x00\x00\x00\x00' | dd of="${binary_path}" bs=1 seek=400 count=4 conv=notrunc
+              # fi
             fi
           done
 
