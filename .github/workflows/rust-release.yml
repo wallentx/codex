@@ -291,10 +291,24 @@ jobs:
           # Add toolchain to PATH
           echo "${toolchain}/bin" >> "$GITHUB_PATH"
 
+          tls_align_source="${RUNNER_TEMP}/codex-android-tls-align.S"
+          tls_align_object="${RUNNER_TEMP}/codex-android-tls-align.o"
+          cat > "${tls_align_source}" <<'EOF'
+          .section .tdata.codex_android_tls_align,"awT",%progbits
+          .p2align 6
+          .globl __codex_android_tls_align
+          .hidden __codex_android_tls_align
+          .type __codex_android_tls_align, %object
+          __codex_android_tls_align:
+          .byte 0
+          .size __codex_android_tls_align, 1
+          EOF
+          "${toolchain}/bin/aarch64-linux-android${api_level}-clang" -c "${tls_align_source}" -o "${tls_align_object}"
+
           # Provide C++ ABI (exceptions, RTTI, vtables) missing from libc++_static pulled in by oboe-sys
           rustflags_var="CARGO_TARGET_${target^^}_RUSTFLAGS"
           rustflags_var="${rustflags_var//-/_}"
-          echo "${rustflags_var}=-C link-arg=-lc++abi -C link-arg=-Wl,-z,max-page-size=65536" >> "$GITHUB_ENV"
+          echo "${rustflags_var}=-C link-arg=${tls_align_object} -C link-arg=-Wl,-u,__codex_android_tls_align -C link-arg=-lc++abi -C link-arg=-Wl,-z,max-page-size=65536" >> "$GITHUB_ENV"
 
 
           # Configure for vendored OpenSSL build
