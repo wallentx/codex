@@ -441,7 +441,7 @@ async fn process_request(
                         &format!("Token exchange failed: {err}"),
                         io::ErrorKind::Other,
                         Some("token_exchange_failed"),
-                        debug_description.as_deref(),
+                        /*error_description*/ None,
                     )
                 }
             }
