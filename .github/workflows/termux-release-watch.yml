@@ -39,6 +39,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: 🧰 Actions Toolbox
+        # This is required for the GitHub CLI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: wallentx/gh-actions/composite/actions-toolbox@main
+
       - name: Configure git
         shell: bash
         run: |

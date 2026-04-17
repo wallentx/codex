@@ -47,6 +47,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: 🧰 Actions Toolbox
+        # This is required for the GitHub CLI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: wallentx/gh-actions/composite/actions-toolbox@main
       - uses: dtolnay/rust-toolchain@1.92
       - name: Validate tag matches Cargo.toml version
         shell: bash
@@ -798,6 +803,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: 🧰 Actions Toolbox
+        # This is required for the GitHub CLI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: wallentx/gh-actions/composite/actions-toolbox@main
 
       - name: Generate release notes from tag commit message
         id: release_notes
