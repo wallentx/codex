@@ -130,40 +130,20 @@ jobs:
           }
 
           if [[ -n "${REQUESTED_TAG}" ]]; then
-            release_json="$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${REQUESTED_TAG}")"
-            release_branch="$(candidate_release_branch "${REQUESTED_TAG}")"
-            if ! release_tag_is_newer_than_current_train "${REQUESTED_TAG}" "${release_branch}"; then
-              current_tag="$(release_branch_current_tag "${release_branch}")"
-              echo "${REQUESTED_TAG} is not newer than ${current_tag} already recorded on ${release_branch}; nothing to do."
-              echo "selected=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+            release_json="$(
+              gh release view "${REQUESTED_TAG}" \
+                --repo "${UPSTREAM_REPO}" \
+                --json tagName,name,body,url,isPrerelease,targetCommitish,databaseId
+            )"
           else
-            releases="$(gh api "repos/${UPSTREAM_REPO}/releases?per_page=50")"
-            mapfile -t candidates < <(
-              jq -c '
-                [.[] | select(.draft == false and (.tag_name | startswith("rust-v")))]
-                | sort_by(.published_at)
-                | reverse
-                | .[]
-              ' <<< "${releases}"
-            )
-
-            release_json=""
-            for candidate in "${candidates[@]}"; do
-              tag="$(jq -r '.tag_name' <<< "${candidate}")"
-              release_branch="$(candidate_release_branch "${tag}")"
-              if ! release_tag_is_newer_than_current_train "${tag}" "${release_branch}"; then
-                current_tag="$(release_branch_current_tag "${release_branch}")"
-                echo "Skipping ${tag}; ${release_branch} already records ${current_tag}."
-                continue
-              fi
-              if gh release view "${tag}-termux" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-                continue
-              fi
-              release_json="${candidate}"
-              break
-            done
+            release_json="$(
+              gh release list \
+                --repo "${UPSTREAM_REPO}" \
+                --exclude-drafts \
+                --limit 1 \
+                --json tagName,name,body,url,isPrerelease,targetCommitish,databaseId \
+                | jq -c '.[0] // empty'
+            )"
           fi
 
           if [[ -z "${release_json}" ]]; then
@@ -172,18 +152,32 @@ jobs:
             exit 0
           fi
 
-          upstream_tag="$(jq -r '.tag_name' <<< "${release_json}")"
-          upstream_name="$(jq -r '.name // .tag_name' <<< "${release_json}")"
+          upstream_tag="$(jq -r '.tagName // empty' <<< "${release_json}")"
+          upstream_name="$(jq -r '.name // .tagName' <<< "${release_json}")"
           upstream_body="$(jq -r '.body // ""' <<< "${release_json}")"
-          upstream_html_url="$(jq -r '.html_url' <<< "${release_json}")"
-          upstream_prerelease="$(jq -r '.prerelease' <<< "${release_json}")"
-          upstream_target="$(jq -r '.target_commitish // ""' <<< "${release_json}")"
-          upstream_id="$(jq -r '.id' <<< "${release_json}")"
+          upstream_html_url="$(jq -r '.url' <<< "${release_json}")"
+          upstream_prerelease="$(jq -r '.isPrerelease' <<< "${release_json}")"
+          upstream_target="$(jq -r '.targetCommitish // ""' <<< "${release_json}")"
+          upstream_id="$(jq -r '.databaseId // ""' <<< "${release_json}")"
+          if [[ -z "${upstream_tag}" || "${upstream_tag}" != rust-v* ]]; then
+            echo "Latest upstream release is not a rust release: ${upstream_tag}" >&2
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           version="${upstream_tag#rust-v}"
+          version="${version%-termux}"
           release_train="${version%%-*}"
           release_branch="release/${release_train}"
           work_branch="upstream/${upstream_tag}"
           termux_tag="${upstream_tag}-termux"
+
+          if ! release_tag_is_newer_than_current_train "${upstream_tag}" "${release_branch}"; then
+            current_tag="$(release_branch_current_tag "${release_branch}")"
+            echo "${upstream_tag} is not newer than ${current_tag} already recorded on ${release_branch}; nothing to do."
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           if gh release view "${termux_tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             echo "${termux_tag} already exists; nothing to do."
