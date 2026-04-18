@@ -86,8 +86,50 @@ jobs:
         run: |
           set -euo pipefail
 
+          candidate_release_branch() {
+            local tag="$1"
+            local version="${tag#rust-v}"
+            local release_train="${version%%-*}"
+            printf 'release/%s\n' "${release_train}"
+          }
+
+          release_branch_current_tag() {
+            local release_branch="$1"
+            git show "origin/${release_branch}:.github/termux-release.json" 2>/dev/null \
+              | jq -r '.upstream_tag // empty'
+          }
+
+          release_tag_is_newer_than_current_train() {
+            local candidate_tag="$1"
+            local release_branch="$2"
+            local current_tag
+            local candidate_version
+            local current_version
+
+            current_tag="$(release_branch_current_tag "${release_branch}")"
+            if [[ -z "${current_tag}" ]]; then
+              return 0
+            fi
+
+            candidate_version="${candidate_tag#rust-v}"
+            current_version="${current_tag#rust-v}"
+            newest_version="$(
+              printf '%s\n%s\n' "${current_version}" "${candidate_version}" \
+                | sort -V \
+                | tail -n 1
+            )"
+            [[ "${newest_version}" == "${candidate_version}" && "${candidate_version}" != "${current_version}" ]]
+          }
+
           if [[ -n "${REQUESTED_TAG}" ]]; then
             release_json="$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${REQUESTED_TAG}")"
+            release_branch="$(candidate_release_branch "${REQUESTED_TAG}")"
+            if ! release_tag_is_newer_than_current_train "${REQUESTED_TAG}" "${release_branch}"; then
+              current_tag="$(release_branch_current_tag "${release_branch}")"
+              echo "${REQUESTED_TAG} is not newer than ${current_tag} already recorded on ${release_branch}; nothing to do."
+              echo "selected=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           else
             releases="$(gh api "repos/${UPSTREAM_REPO}/releases?per_page=50")"
             mapfile -t candidates < <(
@@ -102,6 +144,12 @@ jobs:
             release_json=""
             for candidate in "${candidates[@]}"; do
               tag="$(jq -r '.tag_name' <<< "${candidate}")"
+              release_branch="$(candidate_release_branch "${tag}")"
+              if ! release_tag_is_newer_than_current_train "${tag}" "${release_branch}"; then
+                current_tag="$(release_branch_current_tag "${release_branch}")"
+                echo "Skipping ${tag}; ${release_branch} already records ${current_tag}."
+                continue
+              fi
               if gh release view "${tag}-termux" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
                 continue
               fi
