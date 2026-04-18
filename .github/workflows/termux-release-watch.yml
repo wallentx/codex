@@ -89,14 +89,22 @@ jobs:
           candidate_release_branch() {
             local tag="$1"
             local version="${tag#rust-v}"
+            version="${version%-termux}"
             local release_train="${version%%-*}"
             printf 'release/%s\n' "${release_train}"
+          }
+
+          normalize_rust_tag_version() {
+            local tag="$1"
+            local version="${tag#rust-v}"
+            version="${version%-termux}"
+            printf '%s\n' "${version}"
           }
 
           release_branch_current_tag() {
             local release_branch="$1"
             git show "origin/${release_branch}:.github/termux-release.json" 2>/dev/null \
-              | jq -r '.upstream_tag // empty'
+              | jq -r '.upstream_tag // .termux_tag // empty'
           }
 
           release_tag_is_newer_than_current_train() {
@@ -111,8 +119,8 @@ jobs:
               return 0
             fi
 
-            candidate_version="${candidate_tag#rust-v}"
-            current_version="${current_tag#rust-v}"
+            candidate_version="$(normalize_rust_tag_version "${candidate_tag}")"
+            current_version="$(normalize_rust_tag_version "${current_tag}")"
             newest_version="$(
               printf '%s\n%s\n' "${current_version}" "${candidate_version}" \
                 | sort -V \
