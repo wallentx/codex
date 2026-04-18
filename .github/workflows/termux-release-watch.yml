@@ -35,17 +35,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  create-release-pr:
+  look-for-newer-release:
     runs-on: ubuntu-24.04
+    outputs:
+      selected: ${{ steps.upstream.outputs.selected }}
+      upstream_tag: ${{ steps.upstream.outputs.upstream_tag }}
+      upstream_name: ${{ steps.upstream.outputs.upstream_name }}
+      upstream_html_url: ${{ steps.upstream.outputs.upstream_html_url }}
+      upstream_prerelease: ${{ steps.upstream.outputs.upstream_prerelease }}
+      upstream_target: ${{ steps.upstream.outputs.upstream_target }}
+      upstream_id: ${{ steps.upstream.outputs.upstream_id }}
+      release_train: ${{ steps.upstream.outputs.release_train }}
+      release_branch: ${{ steps.upstream.outputs.release_branch }}
+      work_branch: ${{ steps.upstream.outputs.work_branch }}
+      termux_tag: ${{ steps.upstream.outputs.termux_tag }}
+      body: ${{ steps.upstream.outputs.body }}
     permissions:
-      actions: write
-      contents: write
-      issues: write
-      pull-requests: write
+      contents: read
     env:
-      REVIEWER: ${{ inputs.reviewer || 'wallentx' }}
       UPSTREAM_REPO: openai/codex
-      PATCH_BRANCH: wallentx/termux-target
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -65,18 +73,6 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         uses: wallentx/gh-actions/composite/actions-toolbox@main
-
-      - name: Configure git
-        shell: bash
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
-          git fetch --prune origin main "${PATCH_BRANCH}"
-          git fetch --prune --tags upstream
 
       - name: Select upstream release
         id: upstream
@@ -206,23 +202,67 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+  create-release-pr:
+    needs: look-for-newer-release
+    if: needs.look-for-newer-release.outputs.selected == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: write
+    env:
+      REVIEWER: ${{ inputs.reviewer || 'wallentx' }}
+      UPSTREAM_REPO: openai/codex
+      PATCH_BRANCH: wallentx/termux-target
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout automation branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: 🧰 Actions Toolbox
+        # This is required for the GitHub CLI
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        uses: wallentx/gh-actions/composite/actions-toolbox@main
+
+      - name: Configure git
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
+          git fetch --prune origin main "${PATCH_BRANCH}"
+          git fetch --prune --tags upstream
+
       - name: Create or update release train PR
-        if: steps.upstream.outputs.selected == 'true'
         id: pr
         shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          UPSTREAM_TAG: ${{ steps.upstream.outputs.upstream_tag }}
-          UPSTREAM_NAME: ${{ steps.upstream.outputs.upstream_name }}
-          UPSTREAM_HTML_URL: ${{ steps.upstream.outputs.upstream_html_url }}
-          UPSTREAM_PRERELEASE: ${{ steps.upstream.outputs.upstream_prerelease }}
-          UPSTREAM_TARGET: ${{ steps.upstream.outputs.upstream_target }}
-          UPSTREAM_ID: ${{ steps.upstream.outputs.upstream_id }}
-          RELEASE_TRAIN: ${{ steps.upstream.outputs.release_train }}
-          RELEASE_BRANCH: ${{ steps.upstream.outputs.release_branch }}
-          WORK_BRANCH: ${{ steps.upstream.outputs.work_branch }}
-          TERMUX_TAG: ${{ steps.upstream.outputs.termux_tag }}
-          UPSTREAM_BODY: ${{ steps.upstream.outputs.body }}
+          UPSTREAM_TAG: ${{ needs.look-for-newer-release.outputs.upstream_tag }}
+          UPSTREAM_NAME: ${{ needs.look-for-newer-release.outputs.upstream_name }}
+          UPSTREAM_HTML_URL: ${{ needs.look-for-newer-release.outputs.upstream_html_url }}
+          UPSTREAM_PRERELEASE: ${{ needs.look-for-newer-release.outputs.upstream_prerelease }}
+          UPSTREAM_TARGET: ${{ needs.look-for-newer-release.outputs.upstream_target }}
+          UPSTREAM_ID: ${{ needs.look-for-newer-release.outputs.upstream_id }}
+          RELEASE_TRAIN: ${{ needs.look-for-newer-release.outputs.release_train }}
+          RELEASE_BRANCH: ${{ needs.look-for-newer-release.outputs.release_branch }}
+          WORK_BRANCH: ${{ needs.look-for-newer-release.outputs.work_branch }}
+          TERMUX_TAG: ${{ needs.look-for-newer-release.outputs.termux_tag }}
+          UPSTREAM_BODY: ${{ needs.look-for-newer-release.outputs.body }}
         run: |
           set -euo pipefail
           pr_title="Termux ${UPSTREAM_TAG}"
