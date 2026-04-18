@@ -133,14 +133,23 @@ jobs:
                 --json tagName,name,body,url,isPrerelease,targetCommitish,databaseId
             )"
           else
-            release_json="$(
+            upstream_tag="$(
               gh release list \
                 --repo "${UPSTREAM_REPO}" \
                 --exclude-drafts \
                 --limit 1 \
-                --json tagName,name,body,url,isPrerelease,targetCommitish,databaseId \
-                | jq -c '.[0] // empty'
+                --json tagName \
+                --jq '.[0].tagName // empty'
             )"
+            if [[ -z "${upstream_tag}" ]]; then
+              release_json=""
+            else
+              release_json="$(
+                gh release view "${upstream_tag}" \
+                  --repo "${UPSTREAM_REPO}" \
+                  --json tagName,name,body,url,isPrerelease,targetCommitish,databaseId
+              )"
+            fi
           fi
 
           if [[ -z "${release_json}" ]]; then
