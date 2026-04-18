@@ -363,7 +363,6 @@ jobs:
               --repo "${GITHUB_REPOSITORY}" \
               --base "${RELEASE_BRANCH}" \
               --head "${WORK_BRANCH}" \
-              --draft \
               --title "${pr_title}" \
               --body-file "${body_path}"
           )"
