@@ -446,39 +446,7 @@ impl FileWatcher {
         }
     }
 
-      // Bridge `notify`'s callback-based events into the Tokio runtime and
-      // notify the matching subscribers.
-      #[cfg(any(test, not(target_os = "android")))]
-      fn spawn_event_loop(&self, mut raw_rx: mpsc::UnboundedReceiver<notify::Result<Event>>) {
-          if let Ok(handle) = Handle::try_current() {
-              let state = Arc::clone(&self.state);
-              let inner = self.inner.as_ref().map(Arc::downgrade);
-              handle.spawn(async move {
-                  loop {
-                      match raw_rx.recv().await {
-                          Some(Ok(event)) => {
-                              if !is_mutating_event(&event) {
-                                  continue;
-                              }
-                              if event.paths.is_empty() {
-                                  continue;
-                              }
-                              let inner = inner.as_ref().and_then(std::sync::Weak::upgrade);
-                              Self::notify_subscribers(&state, inner.as_ref(), &event.paths).await;
-                          }
-                          Some(Err(err)) => {
-                              warn!("file watcher error: {err}");
-                          }
-                          None => break,
-                      }
-                  }
-              });
-          } else {
-              warn!("file watcher loop skipped: no Tokio runtime available");
-          }
-      }
-
-      fn unregister_paths(&self, subscriber_id: SubscriberId, watched_paths: &[SubscriberWatchKey]) {
+    fn unregister_paths(&self, subscriber_id: SubscriberId, watched_paths: &[SubscriberWatchKey]) {
         let mut state = self
             .state
             .write()
@@ -609,77 +577,77 @@ impl FileWatcher {
         }
         guard.watched_paths.insert(path.to_path_buf(), next_mode);
     }
-      fn apply_actual_watch_move<'a>(
-          path_ref_counts: &mut HashMap<PathBuf, PathWatchCounts>,
-          old_actual: WatchPath,
-          new_actual: WatchPath,
-          count: usize,
-          inner: Option<&'a Arc<Mutex<FileWatcherInner>>>,
-          inner_guard: &mut Option<std::sync::MutexGuard<'a, FileWatcherInner>>,
-      ) {
-          if old_actual == new_actual {
-              return;
-          }
+    fn apply_actual_watch_move<'a>(
+        path_ref_counts: &mut HashMap<PathBuf, PathWatchCounts>,
+        old_actual: WatchPath,
+        new_actual: WatchPath,
+        count: usize,
+        inner: Option<&'a Arc<Mutex<FileWatcherInner>>>,
+        inner_guard: &mut Option<std::sync::MutexGuard<'a, FileWatcherInner>>,
+    ) {
+        if old_actual == new_actual {
+            return;
+        }
 
-          if let Some(counts) = path_ref_counts.get_mut(&old_actual.path) {
-              let previous_mode = counts.effective_mode();
-              counts.decrement(old_actual.recursive, count);
-              let next_mode = counts.effective_mode();
-              if counts.is_empty() {
-                  path_ref_counts.remove(&old_actual.path);
-              }
-              if previous_mode != next_mode {
-                  Self::reconfigure_watch_inner(inner, &old_actual.path, next_mode, inner_guard);
-              }
-          }
+        if let Some(counts) = path_ref_counts.get_mut(&old_actual.path) {
+            let previous_mode = counts.effective_mode();
+            counts.decrement(old_actual.recursive, count);
+            let next_mode = counts.effective_mode();
+            if counts.is_empty() {
+                path_ref_counts.remove(&old_actual.path);
+            }
+            if previous_mode != next_mode {
+                Self::reconfigure_watch_inner(inner, &old_actual.path, next_mode, inner_guard);
+            }
+        }
 
-          let counts = path_ref_counts.entry(new_actual.path.clone()).or_default();
-          let previous_mode = counts.effective_mode();
-          counts.increment(new_actual.recursive, count);
-          let next_mode = counts.effective_mode();
-          if previous_mode != next_mode {
-              Self::reconfigure_watch_inner(inner, &new_actual.path, next_mode, inner_guard);
-          }
-      }
+        let counts = path_ref_counts.entry(new_actual.path.clone()).or_default();
+        let previous_mode = counts.effective_mode();
+        counts.increment(new_actual.recursive, count);
+        let next_mode = counts.effective_mode();
+        if previous_mode != next_mode {
+            Self::reconfigure_watch_inner(inner, &new_actual.path, next_mode, inner_guard);
+        }
+    }
 
-      // Bridge `notify`'s callback-based events into the Tokio runtime and
-      // notify the matching subscribers.
-      #[cfg(any(test, not(target_os = "android")))]
-      fn spawn_event_loop(&self, mut raw_rx: mpsc::UnboundedReceiver<notify::Result<Event>>) {
-          if let Ok(handle) = Handle::try_current() {
-              let state = Arc::clone(&self.state);
-              let inner = self.inner.as_ref().map(Arc::downgrade);
-              handle.spawn(async move {
-                  loop {
-                      match raw_rx.recv().await {
-                          Some(Ok(event)) => {
-                              if !is_mutating_event(&event) {
-                                  continue;
-                              }
-                              if event.paths.is_empty() {
-                                  continue;
-                              }
-                              let inner = inner.as_ref().and_then(std::sync::Weak::upgrade);
-                              Self::notify_subscribers(&state, inner.as_ref(), &event.paths).await;
-                          }
-                          Some(Err(err)) => {
-                              warn!("file watcher error: {err}");
-                          }
-                          None => break,
-                      }
-                  }
-              });
-          } else {
-              warn!("file watcher loop skipped: no Tokio runtime available");
-          }
-      }
+    // Bridge `notify`'s callback-based events into the Tokio runtime and
+    // notify the matching subscribers.
+    #[cfg(any(test, not(target_os = "android")))]
+    fn spawn_event_loop(&self, mut raw_rx: mpsc::UnboundedReceiver<notify::Result<Event>>) {
+        if let Ok(handle) = Handle::try_current() {
+            let state = Arc::clone(&self.state);
+            let inner = self.inner.as_ref().map(Arc::downgrade);
+            handle.spawn(async move {
+                loop {
+                    match raw_rx.recv().await {
+                        Some(Ok(event)) => {
+                            if !is_mutating_event(&event) {
+                                continue;
+                            }
+                            if event.paths.is_empty() {
+                                continue;
+                            }
+                            let inner = inner.as_ref().and_then(std::sync::Weak::upgrade);
+                            Self::notify_subscribers(&state, inner.as_ref(), &event.paths).await;
+                        }
+                        Some(Err(err)) => {
+                            warn!("file watcher error: {err}");
+                        }
+                        None => break,
+                    }
+                }
+            });
+        } else {
+            warn!("file watcher loop skipped: no Tokio runtime available");
+        }
+    }
 
-      #[cfg(any(test, not(target_os = "android")))]
-      async fn notify_subscribers(
-          state: &RwLock<WatchState>,
-          inner: Option<&Arc<Mutex<FileWatcherInner>>>,
-          event_paths: &[PathBuf],
-      ) {
+    #[cfg(any(test, not(target_os = "android")))]
+    async fn notify_subscribers(
+        state: &RwLock<WatchState>,
+        inner: Option<&Arc<Mutex<FileWatcherInner>>>,
+        event_paths: &[PathBuf],
+    ) {
         let subscribers_to_notify: Vec<(WatchSender, Vec<PathBuf>)> = {
             let mut state = state
                 .write()
@@ -781,93 +749,93 @@ fn dedupe_watched_paths(mut watched_paths: Vec<WatchPath>) -> Vec<WatchPath> {
     watched_paths
 }
 
-  /// Returns the actual OS watch path and canonical match path for a request.
-  ///
-  /// Missing targets are watched non-recursively through the nearest existing
-  /// directory ancestor. As path components appear, the actual watch is moved
-  /// closer to the requested path so broad recursive ancestor watches are never
-  /// needed.
-  fn actual_watch_path(requested: &WatchPath) -> (WatchPath, WatchPath, bool) {
-      if requested.path.exists() {
-          let matched_path = requested
-              .path
-              .canonicalize()
-              .unwrap_or_else(|_| requested.path.clone());
-          let actual = requested.clone();
-          let matched = WatchPath {
-              path: matched_path,
-              recursive: requested.recursive,
-          };
-          return (actual, matched, false);
-      }
+/// Returns the actual OS watch path and canonical match path for a request.
+///
+/// Missing targets are watched non-recursively through the nearest existing
+/// directory ancestor. As path components appear, the actual watch is moved
+/// closer to the requested path so broad recursive ancestor watches are never
+/// needed.
+fn actual_watch_path(requested: &WatchPath) -> (WatchPath, WatchPath, bool) {
+    if requested.path.exists() {
+        let matched_path = requested
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| requested.path.clone());
+        let actual = requested.clone();
+        let matched = WatchPath {
+            path: matched_path,
+            recursive: requested.recursive,
+        };
+        return (actual, matched, false);
+    }
 
-      let requested_parent = requested.path.parent();
-      let mut ancestor = requested_parent;
-      while let Some(path) = ancestor {
-          if path.is_dir() {
-              let actual_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-              let matched_path = requested
-                  .path
-                  .strip_prefix(path)
-                  .map(|suffix| actual_path.join(suffix))
-                  .unwrap_or_else(|_| requested.path.clone());
-              let actual = WatchPath {
-                  path: path.to_path_buf(),
-                  recursive: false,
-              };
-              let matched = WatchPath {
-                  path: matched_path,
-                  recursive: requested.recursive,
-              };
-              return (actual, matched, true);
-          }
-          ancestor = path.parent();
-      }
+    let requested_parent = requested.path.parent();
+    let mut ancestor = requested_parent;
+    while let Some(path) = ancestor {
+        if path.is_dir() {
+            let actual_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            let matched_path = requested
+                .path
+                .strip_prefix(path)
+                .map(|suffix| actual_path.join(suffix))
+                .unwrap_or_else(|_| requested.path.clone());
+            let actual = WatchPath {
+                path: path.to_path_buf(),
+                recursive: false,
+            };
+            let matched = WatchPath {
+                path: matched_path,
+                recursive: requested.recursive,
+            };
+            return (actual, matched, true);
+        }
+        ancestor = path.parent();
+    }
 
-      (requested.clone(), requested.clone(), false)
-  }
+    (requested.clone(), requested.clone(), false)
+}
 
-  /// Converts one raw backend event path into the subscriber-visible path.
-  ///
-  /// Matching first uses the canonical path namespace reported by many OS
-  /// backends, then falls back to the originally requested namespace for
-  /// synthetic tests and backends that preserve the input spelling.
-  fn changed_path_for_event(
-      subscriber_watch: &SubscriberWatchKey,
-      subscriber_watch_state: &mut SubscriberWatchState,
-      event_path: &Path,
-  ) -> Option<PathBuf> {
-      if let Some(path) = changed_path_for_matched_path(
-          subscriber_watch,
-          subscriber_watch_state,
-          &subscriber_watch.matched,
-          event_path,
-      ) {
-          return Some(path);
-      }
-      if subscriber_watch.matched.path == subscriber_watch.requested.path {
-          return None;
-      }
-      changed_path_for_matched_path(
-          subscriber_watch,
-          subscriber_watch_state,
-          &subscriber_watch.requested,
-          event_path,
-      )
-  }
+/// Converts one raw backend event path into the subscriber-visible path.
+///
+/// Matching first uses the canonical path namespace reported by many OS
+/// backends, then falls back to the originally requested namespace for
+/// synthetic tests and backends that preserve the input spelling.
+fn changed_path_for_event(
+    subscriber_watch: &SubscriberWatchKey,
+    subscriber_watch_state: &mut SubscriberWatchState,
+    event_path: &Path,
+) -> Option<PathBuf> {
+    if let Some(path) = changed_path_for_matched_path(
+        subscriber_watch,
+        subscriber_watch_state,
+        &subscriber_watch.matched,
+        event_path,
+    ) {
+        return Some(path);
+    }
+    if subscriber_watch.matched.path == subscriber_watch.requested.path {
+        return None;
+    }
+    changed_path_for_matched_path(
+        subscriber_watch,
+        subscriber_watch_state,
+        &subscriber_watch.requested,
+        event_path,
+    )
+}
 
-  /// Applies the watch matching rules in one path namespace and maps any emitted
-  /// path back into the subscriber's requested namespace.
-  fn changed_path_for_matched_path(
-      subscriber_watch: &SubscriberWatchKey,
-      subscriber_watch_state: &mut SubscriberWatchState,
-      matched: &WatchPath,
-      event_path: &Path,
-  ) -> Option<PathBuf> {
-      let requested = &subscriber_watch.requested;
-      if event_path == matched.path {
-          subscriber_watch_state.last_exists = matched.path.exists();
-          return Some(requested.path.clone());
+/// Applies the watch matching rules in one path namespace and maps any emitted
+/// path back into the subscriber's requested namespace.
+fn changed_path_for_matched_path(
+    subscriber_watch: &SubscriberWatchKey,
+    subscriber_watch_state: &mut SubscriberWatchState,
+    matched: &WatchPath,
+    event_path: &Path,
+) -> Option<PathBuf> {
+    let requested = &subscriber_watch.requested;
+    if event_path == matched.path {
+        subscriber_watch_state.last_exists = matched.path.exists();
+        return Some(requested.path.clone());
     }
     if matched.path.starts_with(event_path) {
         let now_exists = matched.path.exists();
