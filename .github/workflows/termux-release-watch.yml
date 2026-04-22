@@ -277,6 +277,10 @@ jobs:
         run: |
           set -euo pipefail
           pr_title="Termux ${UPSTREAM_TAG}"
+          integration_conflicted=false
+          conflict_summary=""
+          conflict_context=""
+          fallback_ref=""
           workflow_seed_dir="${RUNNER_TEMP}/termux-release-workflows"
           mkdir -p "${workflow_seed_dir}"
           cp .github/workflows/rust-release.yml "${workflow_seed_dir}/rust-release.yml"
@@ -348,10 +352,32 @@ jobs:
               ':!.github/workflows/termux-release-promote.yml' \
               > "${RUNNER_TEMP}/termux.patch"
             if [[ -s "${RUNNER_TEMP}/termux.patch" ]]; then
-              git apply --3way "${RUNNER_TEMP}/termux.patch"
+              if ! git apply --3way "${RUNNER_TEMP}/termux.patch"; then
+                integration_conflicted=true
+                conflict_context="Applying the Termux patch branch onto the upstream tag"
+                fallback_ref="origin/${PATCH_BRANCH}"
+                conflict_summary="$(
+                  git diff --name-only --diff-filter=U | sed 's/^/- `&`/'
+                )"
+                echo "Applying the Termux patch branch conflicted; creating a manual-resolution PR instead." >&2
+                git reset --hard "origin/${RELEASE_BRANCH}"
+                git checkout -B "${WORK_BRANCH}" "${fallback_ref}"
+              fi
             fi
           else
-            git merge --no-ff --no-edit "refs/tags/${UPSTREAM_TAG}"
+            if ! git merge --no-ff --no-edit "refs/tags/${UPSTREAM_TAG}"; then
+              integration_conflicted=true
+              conflict_context="Merging the upstream tag into the existing release train branch"
+              fallback_ref="refs/tags/${UPSTREAM_TAG}"
+              conflict_summary="$(
+                git diff --name-only --diff-filter=U | sed 's/^/- `&`/'
+              )"
+              echo "Merging the upstream tag conflicted; creating a manual-resolution PR instead." >&2
+              if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+                git merge --abort
+              fi
+              git checkout -B "${WORK_BRANCH}" "${fallback_ref}"
+            fi
           fi
           seed_release_workflows
 
@@ -406,6 +432,19 @@ jobs:
             echo "- Patch source: \`${PATCH_BRANCH}\`"
             echo
             echo "Merging this PR is the manual approval gate. The release build workflow uploads the Android artifact to test; after merge, the promotion workflow attaches that exact artifact to \`${TERMUX_TAG}\`."
+            if [[ "${integration_conflicted}" == "true" ]]; then
+              echo
+              echo "## Merge conflicts"
+              echo
+              echo "${conflict_context} conflicted in GitHub Actions, so this PR was created from \`${fallback_ref}\` for manual resolution."
+              echo
+              echo "Conflicted paths from the failed integration attempt:"
+              if [[ -n "${conflict_summary}" ]]; then
+                printf '%s\n' "${conflict_summary}"
+              else
+                echo "- Conflict details unavailable"
+              fi
+            fi
             echo
             echo "## Upstream notes"
             echo

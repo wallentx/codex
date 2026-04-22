@@ -78,6 +78,8 @@ jobs:
           source_slug="${SOURCE_BRANCH//\//_}"
           dest_slug="${DESTINATION_BRANCH//\//_}"
           checkpoint_branch="checkpoint/${dest_slug}_from_${source_slug}_${short_sha}"
+          merge_conflicted=false
+          conflict_summary=""
 
           existing_pr_number="$(
             gh pr list \
@@ -95,9 +97,15 @@ jobs:
           git checkout -B "${checkpoint_branch}" "origin/${DESTINATION_BRANCH}"
 
           if ! git merge --no-ff --no-edit "${SOURCE_SHA}"; then
-            echo "Automatic checkpoint merge failed." >&2
-            echo "Resolve manually by merging ${SOURCE_SHA} from ${SOURCE_BRANCH} into ${DESTINATION_BRANCH}." >&2
-            exit 1
+            merge_conflicted=true
+            conflict_summary="$(
+              git diff --name-only --diff-filter=U | sed 's/^/- `&`/'
+            )"
+            echo "Automatic checkpoint merge failed; creating a manual-resolution PR instead." >&2
+            if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+              git merge --abort
+            fi
+            git checkout -B "${checkpoint_branch}" "${SOURCE_SHA}"
           fi
 
           if git cat-file -e "origin/${DESTINATION_BRANCH}:.github" 2>/dev/null; then
@@ -114,7 +122,11 @@ jobs:
 
           if ! git diff --quiet || ! git diff --cached --quiet; then
             git add -A .github
-            git commit --amend --no-edit
+            if [[ "${merge_conflicted}" == "true" ]]; then
+              git commit -m "checkpoint: prepare ${SOURCE_BRANCH} for ${DESTINATION_BRANCH}"
+            else
+              git commit --amend --no-edit
+            fi
           fi
 
           if git diff --quiet "origin/${DESTINATION_BRANCH}" HEAD; then
@@ -138,6 +150,19 @@ jobs:
             echo "- Remaining first-parent commits on source: ${remaining}"
             echo
             echo "This PR carries release-train conflict fixes and follow-up changes back into the reusable Termux patch branch."
+            if [[ "${merge_conflicted}" == "true" ]]; then
+              echo
+              echo "## Merge conflicts"
+              echo
+              echo "GitHub Actions could not create the checkpoint merge commit automatically, so this PR was created from the source branch state for manual conflict resolution."
+              echo
+              echo "Conflicted paths from the failed merge attempt:"
+              if [[ -n "${conflict_summary}" ]]; then
+                printf '%s\n' "${conflict_summary}"
+              else
+                echo "- Conflict details unavailable"
+              fi
+            fi
             echo
             echo "Release-only workflow files and metadata under \`.github\` were restored to the destination branch versions before opening this PR."
           } > "${body_path}"
