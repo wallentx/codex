@@ -39,6 +39,7 @@ use codex_config::types::McpServerTransportConfig;
 use codex_config::types::MemoriesConfig;
 use codex_config::types::MemoriesToml;
 use codex_config::types::ModelAvailabilityNuxConfig;
+use codex_config::types::Notice;
 use codex_config::types::NotificationCondition;
 use codex_config::types::NotificationMethod;
 use codex_config::types::Notifications;
@@ -5299,6 +5300,50 @@ async fn metrics_exporter_defaults_to_statsig_when_missing() -> std::io::Result<
 }
 
 #[tokio::test]
+async fn explicit_null_service_tier_override_sets_fast_default_opt_out() -> std::io::Result<()> {
+    let fixture = create_test_fixture()?;
+
+    let config = Config::load_from_base_config_with_overrides(
+        fixture.cfg.clone(),
+        ConfigOverrides {
+            cwd: Some(fixture.cwd_path()),
+            service_tier: Some(None),
+            ..Default::default()
+        },
+        fixture.codex_home(),
+    )
+    .await?;
+
+    assert_eq!(config.service_tier, None);
+    assert_eq!(config.notices.fast_default_opt_out, Some(true));
+    Ok(())
+}
+
+#[tokio::test]
+async fn fast_default_opt_out_notice_config_is_respected() -> std::io::Result<()> {
+    let fixture = create_test_fixture()?;
+    let mut cfg = fixture.cfg.clone();
+    cfg.notice = Some(Notice {
+        fast_default_opt_out: Some(true),
+        ..Default::default()
+    });
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides {
+            cwd: Some(fixture.cwd_path()),
+            ..Default::default()
+        },
+        fixture.codex_home(),
+    )
+    .await?;
+
+    assert_eq!(config.service_tier, None);
+    assert_eq!(config.notices.fast_default_opt_out, Some(true));
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
     let fixture = create_test_fixture()?;
 
@@ -5732,6 +5777,7 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
             crate::config_loader::WebSearchModeRequirement::Cached,
         ]),
         feature_requirements: None,
+        hooks: None,
         mcp_servers: None,
         apps: None,
         rules: None,
@@ -6407,6 +6453,7 @@ async fn explicit_sandbox_mode_falls_back_when_disallowed_by_requirements() -> s
         remote_sandbox_config: None,
         allowed_web_search_modes: None,
         feature_requirements: None,
+        hooks: None,
         mcp_servers: None,
         apps: None,
         rules: None,
@@ -6559,6 +6606,28 @@ async fn feature_requirements_normalize_effective_feature_values() -> std::io::R
         "{:?}",
         config.startup_warnings
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn feature_requirements_auto_review_disables_guardian_approval() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .cloud_requirements(CloudRequirementsLoader::new(async {
+            Ok(Some(crate::config_loader::ConfigRequirementsToml {
+                feature_requirements: Some(crate::config_loader::FeatureRequirementsToml {
+                    entries: BTreeMap::from([("auto_review".to_string(), false)]),
+                }),
+                ..Default::default()
+            }))
+        }))
+        .build()
+        .await?;
+
+    assert!(!config.features.enabled(Feature::GuardianApproval));
 
     Ok(())
 }
@@ -7023,10 +7092,10 @@ async fn feature_requirements_normalize_runtime_feature_mutations() -> std::io::
 }
 
 #[tokio::test]
-async fn feature_requirements_reject_collab_legacy_alias() {
-    let codex_home = TempDir::new().expect("tempdir");
+async fn feature_requirements_warn_on_collab_legacy_alias() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
 
-    let err = ConfigBuilder::default()
+    let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
         .cloud_requirements(CloudRequirementsLoader::new(async {
             Ok(Some(crate::config_loader::ConfigRequirementsToml {
@@ -7037,15 +7106,49 @@ async fn feature_requirements_reject_collab_legacy_alias() {
             }))
         }))
         .build()
-        .await
-        .expect_err("legacy aliases should be rejected");
+        .await?;
 
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(config.features.enabled(Feature::Collab));
     assert!(
-        err.to_string()
-            .contains("use canonical feature key `multi_agent`"),
-        "{err}"
+        config.startup_warnings.iter().any(|warning| {
+            warning.contains("Using legacy `features` requirement `collab`")
+                && warning.contains("prefer canonical feature key `multi_agent`")
+        }),
+        "{:?}",
+        config.startup_warnings
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn feature_requirements_warn_and_ignore_unknown_feature() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .cloud_requirements(CloudRequirementsLoader::new(async {
+            Ok(Some(crate::config_loader::ConfigRequirementsToml {
+                feature_requirements: Some(crate::config_loader::FeatureRequirementsToml {
+                    entries: BTreeMap::from([("made_up_feature".to_string(), true)]),
+                }),
+                ..Default::default()
+            }))
+        }))
+        .build()
+        .await?;
+
+    assert!(
+        config
+            .startup_warnings
+            .iter()
+            .any(|warning| warning
+                .contains("Ignoring unknown `features` requirement `made_up_feature`")),
+        "{:?}",
+        config.startup_warnings
+    );
+
+    Ok(())
 }
 
 #[tokio::test]

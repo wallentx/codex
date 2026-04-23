@@ -71,6 +71,8 @@ export type { ConfigRequirementsReadResponse } from "./ConfigRequirementsReadRes
 export type { ConfigValueWriteParams } from "./ConfigValueWriteParams";
 export type { ConfigWarningNotification } from "./ConfigWarningNotification";
 export type { ConfigWriteResponse } from "./ConfigWriteResponse";
+export type { ConfiguredHookHandler } from "./ConfiguredHookHandler";
+export type { ConfiguredHookMatcherGroup } from "./ConfiguredHookMatcherGroup";
 export type { ContextCompactedNotification } from "./ContextCompactedNotification";
 export type { CreditsSnapshot } from "./CreditsSnapshot";
 export type { DeprecationNoticeNotification } from "./DeprecationNoticeNotification";
@@ -169,6 +171,7 @@ export type { ListMcpServerStatusResponse } from "./ListMcpServerStatusResponse"
 export type { LoginAccountParams } from "./LoginAccountParams";
 export type { LoginAccountResponse } from "./LoginAccountResponse";
 export type { LogoutAccountResponse } from "./LogoutAccountResponse";
+export type { ManagedHooksRequirements } from "./ManagedHooksRequirements";
 export type { MarketplaceAddParams } from "./MarketplaceAddParams";
 export type { MarketplaceAddResponse } from "./MarketplaceAddResponse";
 export type { MarketplaceInterface } from "./MarketplaceInterface";
@@ -228,6 +231,8 @@ export type { ModelListResponse } from "./ModelListResponse";
 export type { ModelRerouteReason } from "./ModelRerouteReason";
 export type { ModelReroutedNotification } from "./ModelReroutedNotification";
 export type { ModelUpgradeInfo } from "./ModelUpgradeInfo";
+export type { ModelVerification } from "./ModelVerification";
+export type { ModelVerificationNotification } from "./ModelVerificationNotification";
 export type { NetworkAccess } from "./NetworkAccess";
 export type { NetworkApprovalContext } from "./NetworkApprovalContext";
 export type { NetworkApprovalProtocol } from "./NetworkApprovalProtocol";

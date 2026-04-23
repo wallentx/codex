@@ -311,6 +311,8 @@ impl App {
             || approvals_reviewer_override.is_some()
             || sandbox_policy_override.is_some()
         {
+            self.sync_active_thread_permission_settings_to_cached_session()
+                .await;
             // This uses `OverrideTurnContext` intentionally: toggling the
             // experiment should update the active thread's effective approval
             // settings immediately, just like a `/approvals` selection. Without
@@ -638,6 +640,7 @@ mod tests {
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                permission_profile: None,
                 cwd: next_cwd.clone().abs(),
                 reasoning_effort: None,
                 history_log_id: 0,

@@ -1577,6 +1577,7 @@ impl Config {
             sandbox_policy: mut constrained_sandbox_policy,
             web_search_mode: mut constrained_web_search_mode,
             feature_requirements,
+            managed_hooks: _,
             mcp_servers,
             exec_policy: _,
             enforce_residency,
@@ -1665,7 +1666,11 @@ impl Config {
             },
             feature_overrides,
         );
-        let features = ManagedFeatures::from_configured(configured_features, feature_requirements)?;
+        let features = ManagedFeatures::from_configured_with_warnings(
+            configured_features,
+            feature_requirements,
+            &mut startup_warnings,
+        )?;
         let windows_sandbox_mode = resolve_windows_sandbox_mode(&cfg, &config_profile);
         let windows_sandbox_private_desktop =
             resolve_windows_sandbox_private_desktop(&cfg, &config_profile);
@@ -1943,6 +1948,13 @@ impl Config {
 
         let history = cfg.history.unwrap_or_default();
 
+        let agent_max_threads_from_config = cfg.agents.as_ref().and_then(|agents| agents.max_threads);
+        if features.enabled(Feature::MultiAgentV2) && agent_max_threads_from_config.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "agents.max_threads cannot be set when multi_agent_v2 is enabled",
+            ));
+        }
         let agent_max_threads = cfg
             .agents
             .as_ref()
@@ -2030,14 +2042,24 @@ impl Config {
         let forced_login_method = cfg.forced_login_method;
 
         let model = model.or(config_profile.model).or(cfg.model);
-        let service_tier = service_tier_override
-            .unwrap_or_else(|| config_profile.service_tier.or(cfg.service_tier));
+        let mut notices = cfg.notice.unwrap_or_default();
+        let service_tier = match service_tier_override {
+            Some(Some(service_tier)) => Some(service_tier),
+            Some(None) => {
+                // Preserve explicit standard/clear intent after the nested override
+                // collapses into `Config.service_tier = None`.
+                notices.fast_default_opt_out = Some(true);
+                None
+            }
+            None => config_profile.service_tier.or(cfg.service_tier),
+        };
         let service_tier = match service_tier {
             Some(ServiceTier::Fast) if features.enabled(Feature::FastMode) => {
                 Some(ServiceTier::Fast)
             }
+            Some(ServiceTier::Fast) => None,
             Some(ServiceTier::Flex) => Some(ServiceTier::Flex),
-            _ => None,
+            None => None,
         };
 
         let compact_prompt = compact_prompt.or(cfg.compact_prompt).and_then(|value| {
@@ -2413,7 +2435,7 @@ impl Config {
             active_profile: active_profile_name,
             active_project,
             windows_wsl_setup_acknowledged: cfg.windows_wsl_setup_acknowledged.unwrap_or(false),
-            notices: cfg.notice.unwrap_or_default(),
+            notices,
             check_for_update_on_startup,
             disable_paste_burst: cfg.disable_paste_burst.unwrap_or(false),
             analytics_enabled: config_profile
