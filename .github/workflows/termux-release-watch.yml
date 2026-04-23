@@ -296,6 +296,11 @@ jobs:
             cp "${workflow_seed_dir}/termux-release-promote.yml" .github/workflows/termux-release-promote.yml
           }
 
+          reset_for_fallback_checkout() {
+            git reset --hard "origin/${RELEASE_BRANCH}"
+            git clean -fd .github/workflows
+          }
+
           existing_prs="$(
             gh pr list \
               --repo "${GITHUB_REPOSITORY}" \
@@ -360,7 +365,7 @@ jobs:
                   git diff --name-only --diff-filter=U | sed 's/^/- `&`/'
                 )"
                 echo "Applying the Termux patch branch conflicted; creating a manual-resolution PR instead." >&2
-                git reset --hard "origin/${RELEASE_BRANCH}"
+                reset_for_fallback_checkout
                 git checkout -B "${WORK_BRANCH}" "${fallback_ref}"
               fi
             fi
@@ -376,6 +381,7 @@ jobs:
               if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
                 git merge --abort
               fi
+              reset_for_fallback_checkout
               git checkout -B "${WORK_BRANCH}" "${fallback_ref}"
             fi
           fi
