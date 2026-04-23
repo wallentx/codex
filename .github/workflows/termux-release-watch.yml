@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   look-for-newer-release:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-slim
     outputs:
       selected: ${{ steps.upstream.outputs.selected }}
       upstream_tag: ${{ steps.upstream.outputs.upstream_tag }}
@@ -215,7 +215,7 @@ jobs:
   create-release-pr:
     needs: look-for-newer-release
     if: needs.look-for-newer-release.outputs.selected == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-slim
     permissions:
       actions: write
       contents: write
