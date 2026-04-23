@@ -609,6 +609,7 @@ jobs:
 
   # --- Gatherer job that you mark as the ONLY required status -----------------
   results:
+    if: github.repository == 'openai/codex'
     name: CI results (required)
     needs: [changed, general, cargo_shear, lint_build, tests]
     if: always()

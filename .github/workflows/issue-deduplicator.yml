@@ -78,6 +78,7 @@ jobs:
             }
 
   comment-on-issue:
+    if: github.repository == 'openai/codex'
     name: Comment with potential duplicates
     needs: gather-duplicates
     if: ${{ needs.gather-duplicates.result != 'skipped' }}

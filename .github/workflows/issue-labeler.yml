@@ -86,6 +86,7 @@ jobs:
             }
 
   apply-labels:
+    if: github.repository == 'openai/codex'
     name: Apply labels from Codex output
     needs: gather-labels
     if: ${{ needs.gather-labels.result != 'skipped' }}
