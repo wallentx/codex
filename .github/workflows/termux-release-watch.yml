@@ -286,13 +286,17 @@ jobs:
           cp .github/workflows/rust-release.yml "${workflow_seed_dir}/rust-release.yml"
           cp .github/workflows/shell-tool-mcp.yml "${workflow_seed_dir}/shell-tool-mcp.yml"
           cp .github/workflows/termux-release-checkpoint.yml "${workflow_seed_dir}/termux-release-checkpoint.yml"
+          cp .github/workflows/termux-release-deploy.yml "${workflow_seed_dir}/termux-release-deploy.yml"
           cp .github/workflows/termux-release-promote.yml "${workflow_seed_dir}/termux-release-promote.yml"
 
-          seed_release_workflows() {
+          seed_release_branch_workflows() {
+            # Release branches start from upstream tags, so keep the Termux-owned
+            # CI and deployment workflows authoritative from this automation branch.
             mkdir -p .github/workflows
             cp "${workflow_seed_dir}/rust-release.yml" .github/workflows/rust-release.yml
             cp "${workflow_seed_dir}/shell-tool-mcp.yml" .github/workflows/shell-tool-mcp.yml
             cp "${workflow_seed_dir}/termux-release-checkpoint.yml" .github/workflows/termux-release-checkpoint.yml
+            cp "${workflow_seed_dir}/termux-release-deploy.yml" .github/workflows/termux-release-deploy.yml
             cp "${workflow_seed_dir}/termux-release-promote.yml" .github/workflows/termux-release-promote.yml
           }
 
@@ -332,11 +336,12 @@ jobs:
 
           if [[ "${release_branch_exists}" == false ]]; then
             git checkout -B "${RELEASE_BRANCH}" "refs/tags/${UPSTREAM_TAG}"
-            seed_release_workflows
+            seed_release_branch_workflows
             git add \
               .github/workflows/rust-release.yml \
               .github/workflows/shell-tool-mcp.yml \
               .github/workflows/termux-release-checkpoint.yml \
+              .github/workflows/termux-release-deploy.yml \
               .github/workflows/termux-release-promote.yml
             if ! git diff --cached --quiet; then
               git commit -m "Seed Termux release automation"
@@ -346,7 +351,7 @@ jobs:
 
           git fetch origin "${RELEASE_BRANCH}"
           git checkout -B "${WORK_BRANCH}" "origin/${RELEASE_BRANCH}"
-          seed_release_workflows
+          seed_release_branch_workflows
 
           if [[ "${release_branch_exists}" == false ]]; then
             git diff --binary "origin/main...origin/${PATCH_BRANCH}" \
@@ -354,6 +359,7 @@ jobs:
               ':!.github/workflows/rust-release.yml' \
               ':!.github/workflows/shell-tool-mcp.yml' \
               ':!.github/workflows/termux-release-checkpoint.yml' \
+              ':!.github/workflows/termux-release-deploy.yml' \
               ':!.github/workflows/termux-release-promote.yml' \
               > "${RUNNER_TEMP}/termux.patch"
             if [[ -s "${RUNNER_TEMP}/termux.patch" ]]; then
@@ -385,7 +391,7 @@ jobs:
               git checkout -B "${WORK_BRANCH}" "${fallback_ref}"
             fi
           fi
-          seed_release_workflows
+          seed_release_branch_workflows
 
           mkdir -p .github
           jq -n \
@@ -437,7 +443,7 @@ jobs:
             echo "- Release train branch: \`${RELEASE_BRANCH}\`"
             echo "- Patch source: \`${PATCH_BRANCH}\`"
             echo
-            echo "Merging this PR is the manual approval gate. The release build workflow uploads the Android artifact to test; after merge, the promotion workflow attaches that exact artifact to \`${TERMUX_TAG}\`."
+            echo "Merging this PR is the manual approval gate. The release build workflow uploads the Android artifact to test; after merge, the deployment workflow attaches that exact artifact to \`${TERMUX_TAG}\` and opens the checkpoint PR."
             if [[ "${integration_conflicted}" == "true" ]]; then
               echo
               echo "## Merge conflicts"

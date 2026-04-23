@@ -1,9 +1,6 @@
 name: termux-release-checkpoint
 
 on:
-  push:
-    branches:
-      - "release/**"
   workflow_dispatch:
     inputs:
       source_branch:
@@ -48,7 +45,6 @@ concurrency:
 jobs:
   checkpoint:
     runs-on: ubuntu-slim
-    if: ${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Seed Termux release automation') }}
     permissions:
       contents: write
       issues: write
