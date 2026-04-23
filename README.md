@@ -3,11 +3,30 @@
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
 </p>
+<p align="center">
+  <a href="https://github.com/wallentx/codex-termux/releases/download/rust-v0.124.0-alpha.3-termux/codex-aarch64-linux-android.tar.gz">
+    <img alt="Latest Termux release" src="https://img.shields.io/github/v/release/wallentx/codex-termux?include_prereleases&display_name=tag&label=termux%20android" />
+  </a>
+</p>
 </br>
 If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
 </br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
 
 ---
+
+## Termux Fork
+
+This fork is used to build Android binaries that run under Termux.
+
+The actual Termux compatibility code changes live on the `wallentx/termux-target` branch, mainly under `codex-rs/` plus a small number of supporting files such as `justfile` and `scripts/termux-lock-audit.sh`.
+
+This `dev` branch is primarily the automation branch. Most of the changes here outside the Termux patch layer are GitHub Actions orchestration for:
+
+- watching upstream releases and prereleases
+- seeding `release/*` branches
+- building the Android artifact
+- promoting tested artifacts into GitHub releases
+- checkpointing release-train fixes back into `wallentx/termux-target`
 
 ## Quickstart
 

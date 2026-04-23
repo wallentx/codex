@@ -111,6 +111,11 @@ jobs:
             local current_tag
             local candidate_version
             local current_version
+            local candidate_base
+            local current_base
+            local candidate_is_prerelease=false
+            local current_is_prerelease=false
+            local newest_version
 
             current_tag="$(release_branch_current_tag "${release_branch}")"
             if [[ -z "${current_tag}" ]]; then
@@ -119,6 +124,25 @@ jobs:
 
             candidate_version="$(normalize_rust_tag_version "${candidate_tag}")"
             current_version="$(normalize_rust_tag_version "${current_tag}")"
+            candidate_base="${candidate_version%%-*}"
+            current_base="${current_version%%-*}"
+
+            if [[ "${candidate_version}" == *-* ]]; then
+              candidate_is_prerelease=true
+            fi
+            if [[ "${current_version}" == *-* ]]; then
+              current_is_prerelease=true
+            fi
+
+            if [[ "${candidate_base}" == "${current_base}" ]]; then
+              if [[ "${current_is_prerelease}" == true && "${candidate_is_prerelease}" == false ]]; then
+                return 0
+              fi
+              if [[ "${current_is_prerelease}" == false && "${candidate_is_prerelease}" == true ]]; then
+                return 1
+              fi
+            fi
+
             newest_version="$(
               printf '%s\n%s\n' "${current_version}" "${candidate_version}" \
                 | sort -V \
