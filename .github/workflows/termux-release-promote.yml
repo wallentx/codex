@@ -47,7 +47,7 @@ concurrency:
 jobs:
   promote:
     runs-on: ubuntu-24.04
-    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, 'Seed Termux release automation') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'Seed Termux release automation') }}
     permissions:
       actions: read
       contents: write

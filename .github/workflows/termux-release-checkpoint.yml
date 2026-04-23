@@ -48,7 +48,7 @@ concurrency:
 jobs:
   checkpoint:
     runs-on: ubuntu-24.04
-    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, 'Seed Termux release automation') }}
+    if: ${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Seed Termux release automation') }}
     permissions:
       contents: write
       issues: write
