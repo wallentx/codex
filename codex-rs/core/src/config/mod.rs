@@ -432,9 +432,6 @@ pub struct Config {
     /// Maximum runtime in seconds for agent job workers before they are failed.
     pub agent_job_max_runtime_seconds: Option<u64>,
 
-    /// Whether to record a model-visible message when an agent turn is interrupted.
-    pub agent_interrupt_message_enabled: bool,
-
     /// Maximum nesting depth allowed for spawned agent threads.
     pub agent_max_depth: i32,
 
@@ -1866,8 +1863,7 @@ impl Config {
                     }
                 }
             }
-            let file_system_sandbox_policy =
-                FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
+            let file_system_sandbox_policy = FileSystemSandboxPolicy::from_legacy_sandbox_policy(
                 &sandbox_policy,
                 resolved_cwd.as_path(),
             );
@@ -2006,11 +2002,6 @@ impl Config {
                 "agents.job_max_runtime_seconds must fit within a 64-bit signed integer",
             ));
         }
-        let agent_interrupt_message_enabled = cfg
-            .agents
-            .as_ref()
-            .and_then(|agents| agents.interrupt_message)
-            .unwrap_or(true);
         let background_terminal_max_timeout = cfg
             .background_terminal_max_timeout
             .unwrap_or(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
@@ -2375,7 +2366,6 @@ impl Config {
             agent_roles,
             memories: cfg.memories.unwrap_or_default().into(),
             agent_job_max_runtime_seconds,
-            agent_interrupt_message_enabled,
             codex_home,
             sqlite_home,
             log_dir,
