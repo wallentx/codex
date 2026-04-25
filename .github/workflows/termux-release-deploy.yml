@@ -477,15 +477,23 @@ jobs:
           git checkout -B "${checkpoint_branch}" "origin/${DESTINATION_BRANCH}"
 
           if ! git merge --no-ff --no-edit "${SOURCE_SHA}"; then
-            merge_conflicted=true
-            conflict_summary="$(
-              git diff --name-only --diff-filter=U | sed 's/^/- `&`/'
-            )"
-            echo "Automatic checkpoint merge failed; creating a manual-resolution PR instead." >&2
-            if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
-              git merge --abort
+            mapfile -t conflicted_paths < <(git diff --name-only --diff-filter=U)
+            if [[ "${#conflicted_paths[@]}" -eq 1 && "${conflicted_paths[0]}" == "codex-rs/Cargo.toml" ]]; then
+              echo "Auto-resolving recurring codex-rs/Cargo.toml checkpoint conflict by keeping ${SOURCE_BRANCH}."
+              git checkout --theirs -- codex-rs/Cargo.toml
+              git add codex-rs/Cargo.toml
+              git commit --no-edit
+            else
+              merge_conflicted=true
+              conflict_summary="$(
+                printf '%s\n' "${conflicted_paths[@]}" | sed 's/^/- `&`/'
+              )"
+              echo "Automatic checkpoint merge failed; creating a manual-resolution PR instead." >&2
+              if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+                git merge --abort
+              fi
+              git checkout -B "${checkpoint_branch}" "${SOURCE_SHA}"
             fi
-            git checkout -B "${checkpoint_branch}" "${SOURCE_SHA}"
           fi
 
           if git cat-file -e "origin/${DESTINATION_BRANCH}:.github" 2>/dev/null; then
