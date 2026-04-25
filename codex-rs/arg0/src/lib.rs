@@ -493,7 +493,7 @@ mod tests {
         let alias_path = temp_dir.path().join("codex-linux-sandbox");
         let path_entry = Arg0PathEntryGuard::new(
             temp_dir,
-            Some(lock_file),
+            lock_file,
             Arg0DispatchPaths {
                 codex_self_exe: Some(PathBuf::from("/usr/bin/codex")),
                 codex_linux_sandbox_exe: Some(alias_path.clone()),
@@ -573,7 +573,7 @@ mod tests {
             TryFileLockOutcome::Acquired => {}
             TryFileLockOutcome::Unsupported => return Ok(()),
             TryFileLockOutcome::WouldBlock => {
-                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+                panic!("newly created lock file should not be locked");
             }
         }
 
@@ -588,22 +588,11 @@ mod tests {
         let root = tempfile::tempdir()?;
         let dir = root.path().join("stale");
         fs::create_dir(&dir)?;
-        let lock_file = create_lock(&dir)?;
-        let lock_supported = match try_lock_exclusive_optional(&lock_file)? {
-            TryFileLockOutcome::Acquired => true,
-            TryFileLockOutcome::Unsupported => false,
-            TryFileLockOutcome::WouldBlock => {
-                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
-            }
-        };
+        create_lock(&dir)?;
 
         janitor_cleanup(root.path())?;
 
-        if lock_supported {
-            assert!(!dir.exists());
-        } else {
-            assert!(dir.exists());
-        }
+        assert!(!dir.exists());
         Ok(())
     }
 }
