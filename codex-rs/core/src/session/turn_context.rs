@@ -181,7 +181,6 @@ impl TurnContext {
         .with_spawn_agent_usage_hint(config.multi_agent_v2.usage_hint_enabled)
         .with_spawn_agent_usage_hint_text(config.multi_agent_v2.usage_hint_text.clone())
         .with_hide_spawn_agent_metadata(config.multi_agent_v2.hide_spawn_agent_metadata)
-        .with_max_concurrent_threads_per_session(config.agent_max_threads)
         .with_agent_type_description(crate::agent::role::spawn_tool_spec::build(
             &config.agent_roles,
         ));
@@ -280,11 +279,10 @@ impl TurnContext {
         // the legacy sandbox policy. This keeps turn-context payloads stable
         // while both fields exist; once callers consume only the split policy,
         // this comparison and the legacy projection should go away.
-        let legacy_file_system_sandbox_policy =
-            FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
-                self.sandbox_policy.get(),
-                &self.cwd,
-            );
+        let legacy_file_system_sandbox_policy = FileSystemSandboxPolicy::from_legacy_sandbox_policy(
+            self.sandbox_policy.get(),
+            &self.cwd,
+        );
         (self.file_system_sandbox_policy != legacy_file_system_sandbox_policy)
             .then(|| self.file_system_sandbox_policy.clone())
     }
@@ -444,7 +442,6 @@ impl Session {
         .with_spawn_agent_usage_hint(per_turn_config.multi_agent_v2.usage_hint_enabled)
         .with_spawn_agent_usage_hint_text(per_turn_config.multi_agent_v2.usage_hint_text.clone())
         .with_hide_spawn_agent_metadata(per_turn_config.multi_agent_v2.hide_spawn_agent_metadata)
-        .with_max_concurrent_threads_per_session(per_turn_config.agent_max_threads)
         .with_agent_type_description(crate::agent::role::spawn_tool_spec::build(
             &per_turn_config.agent_roles,
         ));
