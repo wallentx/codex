@@ -324,6 +324,46 @@ jobs:
             cp "${workflow_seed_dir}/termux-release-promote.yml" .github/workflows/termux-release-promote.yml
           }
 
+          is_seeded_release_workflow() {
+            case "$1" in
+              .github/workflows/rust-release.yml | \
+              .github/workflows/shell-tool-mcp.yml | \
+              .github/workflows/termux-release-checkpoint.yml | \
+              .github/workflows/termux-release-deploy.yml | \
+              .github/workflows/termux-release-promote.yml)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          resolve_seeded_release_workflow_conflicts() {
+            local conflicted_path
+            local resolved_any=false
+
+            mapfile -t conflicted_paths < <(git diff --name-only --diff-filter=U)
+            for conflicted_path in "${conflicted_paths[@]}"; do
+              if is_seeded_release_workflow "${conflicted_path}"; then
+                resolved_any=true
+              fi
+            done
+
+            if [[ "${resolved_any}" != "true" ]]; then
+              return 0
+            fi
+
+            echo "Auto-resolving Termux-owned release workflow conflicts from the automation branch."
+            seed_release_branch_workflows
+            git add \
+              .github/workflows/rust-release.yml \
+              .github/workflows/shell-tool-mcp.yml \
+              .github/workflows/termux-release-checkpoint.yml \
+              .github/workflows/termux-release-deploy.yml \
+              .github/workflows/termux-release-promote.yml
+          }
+
           reset_for_fallback_checkout() {
             git reset --hard "origin/${RELEASE_BRANCH}"
             git clean -fd .github/workflows
@@ -417,7 +457,6 @@ jobs:
 
           git fetch origin "${RELEASE_BRANCH}"
           git checkout -B "${WORK_BRANCH}" "origin/${RELEASE_BRANCH}"
-          seed_release_branch_workflows
 
           if [[ "${release_branch_exists}" == false ]]; then
             normalized_patch_ref="termux-patch-normalized/${UPSTREAM_TAG}"
@@ -449,18 +488,24 @@ jobs:
             fi
           else
             if ! git merge --no-ff --no-edit "refs/tags/${UPSTREAM_TAG}"; then
-              integration_conflicted=true
-              conflict_context="Merging the upstream tag into the existing release train branch"
-              fallback_ref="refs/tags/${UPSTREAM_TAG}"
-              conflict_summary="$(
-                git diff --name-only --diff-filter=U | sed 's/^/- `&`/'
-              )"
-              echo "Merging the upstream tag conflicted; creating a manual-resolution PR instead." >&2
-              if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
-                git merge --abort
+              resolve_seeded_release_workflow_conflicts
+              remaining_conflicts="$(git diff --name-only --diff-filter=U)"
+              if [[ -z "${remaining_conflicts}" ]]; then
+                git commit --no-edit
+              else
+                integration_conflicted=true
+                conflict_context="Merging the upstream tag into the existing release train branch"
+                fallback_ref="refs/tags/${UPSTREAM_TAG}"
+                conflict_summary="$(
+                  printf '%s\n' "${remaining_conflicts}" | sed 's/^/- `&`/'
+                )"
+                echo "Merging the upstream tag conflicted; creating a manual-resolution PR instead." >&2
+                if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+                  git merge --abort
+                fi
+                reset_for_fallback_checkout
+                git checkout -B "${WORK_BRANCH}" "${fallback_ref}"
               fi
-              reset_for_fallback_checkout
-              git checkout -B "${WORK_BRANCH}" "${fallback_ref}"
             fi
           fi
           seed_release_branch_workflows
