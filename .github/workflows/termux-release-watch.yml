@@ -364,6 +364,55 @@ jobs:
               .github/workflows/termux-release-promote.yml
           }
 
+          resolve_workspace_version_conflict() {
+            local upstream_version
+
+            upstream_version="$(workspace_version_from_ref "refs/tags/${UPSTREAM_TAG}")"
+            if [[ -z "${upstream_version}" ]]; then
+              echo "Unable to read workspace package version from refs/tags/${UPSTREAM_TAG}" >&2
+              return 1
+            fi
+
+            UPSTREAM_WORKSPACE_VERSION="${upstream_version}" perl -0pi -e '
+              my $version = $ENV{"UPSTREAM_WORKSPACE_VERSION"};
+              s/<<<<<<<[^\n]*\n(version = ")[^"]+("\n)=======\n\1[^"]+\2>>>>>>>[^\n]*(\n)/$1$version$2$3/s
+                or die "workspace.package version conflict not found\n";
+            ' codex-rs/Cargo.toml
+            git add codex-rs/Cargo.toml
+          }
+
+          resolve_known_release_train_conflicts() {
+            local conflicted_path
+
+            resolve_seeded_release_workflow_conflicts
+
+            mapfile -t conflicted_paths < <(git diff --name-only --diff-filter=U)
+            for conflicted_path in "${conflicted_paths[@]}"; do
+              case "${conflicted_path}" in
+                .github/workflows/*)
+                  echo "Auto-resolving upstream workflow conflict in ${conflicted_path} by keeping ${RELEASE_BRANCH}."
+                  git checkout --ours -- "${conflicted_path}"
+                  git add "${conflicted_path}"
+                  ;;
+              esac
+            done
+
+            mapfile -t conflicted_paths < <(git diff --name-only --diff-filter=U)
+            for conflicted_path in "${conflicted_paths[@]}"; do
+              case "${conflicted_path}" in
+                codex-rs/Cargo.toml)
+                  echo "Auto-resolving recurring workspace version conflict in codex-rs/Cargo.toml."
+                  resolve_workspace_version_conflict
+                  ;;
+                codex-rs/app-server/tests/suite/v2/thread_resume.rs)
+                  echo "Auto-resolving upstream-only app-server test conflict in ${conflicted_path} by keeping refs/tags/${UPSTREAM_TAG}."
+                  git checkout --theirs -- "${conflicted_path}"
+                  git add "${conflicted_path}"
+                  ;;
+              esac
+            done
+          }
+
           reset_for_fallback_checkout() {
             git reset --hard "origin/${RELEASE_BRANCH}"
             git clean -fd .github/workflows
@@ -488,7 +537,7 @@ jobs:
             fi
           else
             if ! git merge --no-ff --no-edit "refs/tags/${UPSTREAM_TAG}"; then
-              resolve_seeded_release_workflow_conflicts
+              resolve_known_release_train_conflicts
               remaining_conflicts="$(git diff --name-only --diff-filter=U)"
               if [[ -z "${remaining_conflicts}" ]]; then
                 git commit --no-edit
