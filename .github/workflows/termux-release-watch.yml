@@ -593,3 +593,134 @@ jobs:
           gh label create release-train --repo "${GITHUB_REPOSITORY}" --color 1d76db --description "Release train PR" --force
           gh pr edit "${pr_url}" --repo "${GITHUB_REPOSITORY}" --add-label "termux-release" --add-label "release-train"
           echo "pr_url=${pr_url}" >> "$GITHUB_OUTPUT"
+
+  cleanup-old-release-branches:
+    needs:
+      - look-for-newer-release
+      - create-release-pr
+    if: needs.look-for-newer-release.outputs.selected == 'true' && needs.create-release-pr.result == 'success'
+    runs-on: ubuntu-slim
+    permissions:
+      contents: write
+      pull-requests: read
+    env:
+      GH_REPO: ${{ github.repository }}
+      CURRENT_RELEASE_TRAIN: ${{ needs.look-for-newer-release.outputs.release_train }}
+      CURRENT_RELEASE_BRANCH: ${{ needs.look-for-newer-release.outputs.release_branch }}
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout automation branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: 🧰 Actions Toolbox
+        # This is required for the GitHub CLI
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        uses: wallentx/gh-actions/composite/actions-toolbox@main
+
+      - name: Delete completed old release branches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          release_train_is_older() {
+            local candidate_train="$1"
+            local current_train="$2"
+            local newest_train
+
+            if [[ "${candidate_train}" == "${current_train}" ]]; then
+              return 1
+            fi
+
+            newest_train="$(
+              printf '%s\n%s\n' "${candidate_train}" "${current_train}" \
+                | sort -V \
+                | tail -n 1
+            )"
+            [[ "${newest_train}" == "${current_train}" ]]
+          }
+
+          git fetch --prune origin '+refs/heads/release/*:refs/remotes/origin/release/*'
+
+          open_prs="$(
+            gh pr list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --state open \
+              --limit 200 \
+              --json number,title,body,headRefName,baseRefName,url
+          )"
+
+          mapfile -t release_refs < <(
+            git for-each-ref --format='%(refname:short)' refs/remotes/origin/release
+          )
+
+          if ((${#release_refs[@]} == 0)); then
+            echo "No release branches found."
+            exit 0
+          fi
+
+          for release_ref in "${release_refs[@]}"; do
+            release_branch="${release_ref#origin/}"
+            release_train="${release_branch#release/}"
+
+            if [[ "${release_branch}" == "${CURRENT_RELEASE_BRANCH}" ]]; then
+              echo "Keeping ${release_branch}: current release branch."
+              continue
+            fi
+
+            if ! release_train_is_older "${release_train}" "${CURRENT_RELEASE_TRAIN}"; then
+              echo "Keeping ${release_branch}: not older than ${CURRENT_RELEASE_BRANCH}."
+              continue
+            fi
+
+            metadata="$(git show "${release_ref}:.github/termux-release.json" 2>/dev/null || true)"
+            if [[ -z "${metadata}" ]]; then
+              echo "Keeping ${release_branch}: no .github/termux-release.json metadata."
+              continue
+            fi
+
+            termux_tag="$(jq -r '.termux_tag // empty' <<< "${metadata}")"
+            if [[ -z "${termux_tag}" ]]; then
+              echo "Keeping ${release_branch}: metadata does not include termux_tag."
+              continue
+            fi
+
+            if ! gh release view "${termux_tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              echo "Keeping ${release_branch}: release ${termux_tag} does not exist yet."
+              continue
+            fi
+
+            blocking_prs="$(
+              jq -r --arg branch "${release_branch}" '
+                .[]
+                | select(
+                    .baseRefName == $branch
+                    or .headRefName == $branch
+                    or (.title | contains($branch))
+                    or ((.body // "") | contains($branch))
+                  )
+                | "\(.url) #\(.number)"
+              ' <<< "${open_prs}"
+            )"
+            if [[ -n "${blocking_prs}" ]]; then
+              echo "Keeping ${release_branch}: open PRs still reference it."
+              printf '%s\n' "${blocking_prs}"
+              continue
+            fi
+
+            echo "Deleting completed old release branch ${release_branch} for ${termux_tag}."
+            if ! git push origin --delete "${release_branch}"; then
+              echo "::warning::Failed to delete ${release_branch}; continuing cleanup."
+            fi
+          done
