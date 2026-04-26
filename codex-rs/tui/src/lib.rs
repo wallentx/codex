@@ -125,7 +125,6 @@ mod external_editor;
 mod file_search;
 mod frames;
 mod get_git_diff;
-mod goal_display;
 mod history_cell;
 pub(crate) mod insert_history;
 pub use insert_history::insert_history_lines;

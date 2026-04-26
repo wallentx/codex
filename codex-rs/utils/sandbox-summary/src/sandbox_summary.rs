@@ -23,6 +23,7 @@ pub fn summarize_sandbox_policy(sandbox_policy: &SandboxPolicy) -> String {
             network_access,
             exclude_tmpdir_env_var,
             exclude_slash_tmp,
+            read_only_access: _,
         } => {
             let mut summary = "workspace-write".to_string();
 
@@ -74,6 +75,7 @@ mod tests {
     #[test]
     fn summarizes_read_only_with_enabled_network() {
         let summary = summarize_sandbox_policy(&SandboxPolicy::ReadOnly {
+            access: Default::default(),
             network_access: true,
         });
         assert_eq!(summary, "read-only (network access enabled)");
@@ -85,6 +87,7 @@ mod tests {
         let writable_root = AbsolutePathBuf::try_from(root).unwrap();
         let summary = summarize_sandbox_policy(&SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![writable_root.clone()],
+            read_only_access: Default::default(),
             network_access: true,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,

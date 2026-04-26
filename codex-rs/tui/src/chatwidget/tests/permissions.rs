@@ -54,6 +54,7 @@ async fn preset_matching_accepts_workspace_write_with_extra_roots() {
     let extra_root = test_path_buf("/tmp/extra").abs();
     let current_sandbox = SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![extra_root],
+        read_only_access: Default::default(),
         network_access: false,
         exclude_tmpdir_env_var: false,
         exclude_slash_tmp: false,
@@ -536,6 +537,7 @@ async fn permissions_selection_marks_auto_review_current_with_custom_workspace_w
             approvals_reviewer: ApprovalsReviewer::AutoReview,
             sandbox_policy: SandboxPolicy::WorkspaceWrite {
                 writable_roots: vec![extra_root],
+                read_only_access: ReadOnlyAccess::FullAccess,
                 network_access: false,
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,

@@ -28,6 +28,7 @@ fn test_writable_roots_constraint() {
     // only `cwd` is writable by default.
     let policy_workspace_only = SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![],
+        read_only_access: Default::default(),
         network_access: false,
         exclude_tmpdir_env_var: true,
         exclude_slash_tmp: true,
@@ -49,6 +50,7 @@ fn test_writable_roots_constraint() {
     // outside write should be permitted.
     let policy_with_parent = SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![parent],
+        read_only_access: Default::default(),
         network_access: false,
         exclude_tmpdir_env_var: true,
         exclude_slash_tmp: true,
@@ -96,6 +98,7 @@ fn granular_with_all_flags_true_matches_on_request_for_out_of_root_patch() {
     let add_outside = ApplyPatchAction::new_add_for_test(&outside_path, "".to_string());
     let policy_workspace_only = SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![],
+        read_only_access: Default::default(),
         network_access: false,
         exclude_tmpdir_env_var: true,
         exclude_slash_tmp: true,
@@ -140,6 +143,7 @@ fn granular_sandbox_approval_false_rejects_out_of_root_patch() {
     let add_outside = ApplyPatchAction::new_add_for_test(&outside_path, "".to_string());
     let policy_workspace_only = SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![],
+        read_only_access: Default::default(),
         network_access: false,
         exclude_tmpdir_env_var: true,
         exclude_slash_tmp: true,
@@ -174,7 +178,7 @@ fn read_only_policy_rejects_patch_with_read_only_reason() {
     let action = ApplyPatchAction::new_add_for_test(&inside_path, "".to_string());
     let sandbox_policy = SandboxPolicy::new_read_only_policy();
     let file_system_sandbox_policy =
-        FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(&sandbox_policy, &cwd);
+        FileSystemSandboxPolicy::from_legacy_sandbox_policy(&sandbox_policy, &cwd);
 
     assert!(!is_write_patch_constrained_to_writable_paths(
         &action,
@@ -290,12 +294,13 @@ fn missing_project_dot_codex_config_requires_approval() {
     let action = ApplyPatchAction::new_add_for_test(&config_path, "".to_string());
     let sandbox_policy = SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![],
+        read_only_access: Default::default(),
         network_access: false,
         exclude_tmpdir_env_var: true,
         exclude_slash_tmp: true,
     };
     let file_system_sandbox_policy =
-        FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(&sandbox_policy, &cwd);
+        FileSystemSandboxPolicy::from_legacy_sandbox_policy(&sandbox_policy, &cwd);
 
     assert!(!is_write_patch_constrained_to_writable_paths(
         &action,
