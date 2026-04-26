@@ -16,6 +16,7 @@ use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::ReadOnlyAccess;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
@@ -86,6 +87,7 @@ async fn run_cmd_result_with_writable_roots(
             .iter()
             .map(|p| AbsolutePathBuf::try_from(p.as_path()).unwrap())
             .collect(),
+        read_only_access: Default::default(),
         network_access,
         // Exclude tmp-related folders from writable roots because we need a
         // folder that is writable by tests but that we intentionally disallow
@@ -559,6 +561,7 @@ async fn sandbox_blocks_explicit_split_policy_carveouts_under_bwrap() {
 
     let sandbox_policy = SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![AbsolutePathBuf::try_from(tmpdir.path()).expect("absolute tempdir")],
+        read_only_access: Default::default(),
         network_access: true,
         exclude_tmpdir_env_var: true,
         exclude_slash_tmp: true,
@@ -631,6 +634,7 @@ async fn sandbox_reenables_writable_subpaths_under_unreadable_parents() {
 
     let sandbox_policy = SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![AbsolutePathBuf::try_from(tmpdir.path()).expect("absolute tempdir")],
+        read_only_access: Default::default(),
         network_access: true,
         exclude_tmpdir_env_var: true,
         exclude_slash_tmp: true,
@@ -705,6 +709,7 @@ async fn sandbox_blocks_root_read_carveouts_under_bwrap() {
     std::fs::write(&blocked_target, "secret").expect("seed blocked file");
 
     let sandbox_policy = SandboxPolicy::ReadOnly {
+        access: ReadOnlyAccess::FullAccess,
         network_access: true,
     };
     let file_system_sandbox_policy = FileSystemSandboxPolicy::restricted(vec![

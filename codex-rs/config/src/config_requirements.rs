@@ -1961,6 +1961,7 @@ allowed_approvals_reviewers = ["user"]
                 .sandbox_policy
                 .can_set(&SandboxPolicy::WorkspaceWrite {
                     writable_roots: vec![AbsolutePathBuf::from_absolute_path(root)?],
+                    read_only_access: Default::default(),
                     network_access: false,
                     exclude_tmpdir_env_var: false,
                     exclude_slash_tmp: false,
@@ -2069,6 +2070,7 @@ allowed_approvals_reviewers = ["user"]
                 .sandbox_policy
                 .can_set(&SandboxPolicy::WorkspaceWrite {
                     writable_roots: vec![AbsolutePathBuf::from_absolute_path(root)?],
+                    read_only_access: Default::default(),
                     network_access: false,
                     exclude_tmpdir_env_var: false,
                     exclude_slash_tmp: false,

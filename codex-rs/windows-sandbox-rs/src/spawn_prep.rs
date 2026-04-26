@@ -294,7 +294,6 @@ pub(crate) fn prepare_elevated_spawn_context(
         env_map,
         codex_home,
         /*read_roots_override*/ None,
-        /*read_roots_include_platform_defaults*/ false,
         write_roots_override,
         &deny_write_paths,
         /*proxy_enforced*/ false,
@@ -350,6 +349,7 @@ mod tests {
         assert!(!should_apply_network_block(
             &SandboxPolicy::WorkspaceWrite {
                 writable_roots: Vec::new(),
+                read_only_access: Default::default(),
                 network_access: true,
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,

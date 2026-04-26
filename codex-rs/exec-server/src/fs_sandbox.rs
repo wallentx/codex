@@ -7,6 +7,7 @@ use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::ReadOnlyAccess;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_sandboxing::SandboxCommand;
 use codex_sandboxing::SandboxExecRequest;
@@ -193,6 +194,14 @@ fn compatibility_workspace_write_policy(
     file_system_policy: &FileSystemSandboxPolicy,
     cwd: &std::path::Path,
 ) -> SandboxPolicy {
+    let read_only_access = if file_system_policy.has_full_disk_read_access() {
+        ReadOnlyAccess::FullAccess
+    } else {
+        ReadOnlyAccess::Restricted {
+            include_platform_defaults: file_system_policy.include_platform_defaults(),
+            readable_roots: file_system_policy.get_readable_roots_with_cwd(cwd),
+        }
+    };
     let cwd_abs = AbsolutePathBuf::from_absolute_path(cwd).ok();
     let writable_roots = file_system_policy
         .get_writable_roots_with_cwd(cwd)
@@ -203,6 +212,7 @@ fn compatibility_workspace_write_policy(
 
     SandboxPolicy::WorkspaceWrite {
         writable_roots,
+        read_only_access,
         network_access: false,
         exclude_tmpdir_env_var: true,
         exclude_slash_tmp: true,

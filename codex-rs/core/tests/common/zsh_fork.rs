@@ -43,6 +43,7 @@ impl ZshForkRuntime {
 pub fn restrictive_workspace_write_policy() -> SandboxPolicy {
     SandboxPolicy::WorkspaceWrite {
         writable_roots: Vec::new(),
+        read_only_access: Default::default(),
         network_access: false,
         exclude_tmpdir_env_var: true,
         exclude_slash_tmp: true,

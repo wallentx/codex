@@ -182,6 +182,7 @@ pub(super) use codex_protocol::protocol::PatchApplyStatus as CorePatchApplyStatu
 pub(super) use codex_protocol::protocol::RateLimitReachedType;
 pub(super) use codex_protocol::protocol::RateLimitSnapshot;
 pub(super) use codex_protocol::protocol::RateLimitWindow;
+pub(super) use codex_protocol::protocol::ReadOnlyAccess;
 pub(super) use codex_protocol::protocol::RealtimeConversationClosedEvent;
 pub(super) use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
 pub(super) use codex_protocol::protocol::RealtimeEvent;
@@ -269,7 +270,6 @@ mod approval_requests;
 mod background_events;
 mod composer_submission;
 mod exec_flow;
-mod goal_menu;
 mod guardian;
 mod helpers;
 mod history_replay;
