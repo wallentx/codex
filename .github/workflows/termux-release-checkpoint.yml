@@ -147,8 +147,12 @@ jobs:
             for conflicted_path in "${conflicted_paths[@]}"; do
               if is_release_only_checkpoint_path "${conflicted_path}"; then
                 echo "Auto-resolving release-only checkpoint conflict in ${conflicted_path} by keeping ${DESTINATION_BRANCH}."
-                git checkout --ours -- "${conflicted_path}"
-                git add "${conflicted_path}"
+                if git cat-file -e "HEAD:${conflicted_path}" 2>/dev/null; then
+                  git checkout --ours -- "${conflicted_path}"
+                  git add "${conflicted_path}"
+                else
+                  git rm -f --ignore-unmatch "${conflicted_path}"
+                fi
               fi
             done
 
