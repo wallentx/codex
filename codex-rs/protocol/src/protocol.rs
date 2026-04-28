@@ -2998,7 +2998,6 @@ impl From<CompactedItem> for ResponseItem {
             content: vec![ContentItem::OutputText {
                 text: value.message,
             }],
-            end_turn: None,
             phase: None,
         }
     }
