@@ -1615,6 +1615,7 @@ async fn auto_compact_runs_after_resume_when_token_usage_is_over_limit() {
             content: vec![codex_protocol::models::ContentItem::OutputText {
                 text: remote_summary.to_string(),
             }],
+            end_turn: None,
             phase: None,
         },
         codex_protocol::models::ResponseItem::Compaction {
@@ -2860,6 +2861,7 @@ async fn auto_compact_counts_encrypted_reasoning_before_last_user() {
             content: vec![codex_protocol::models::ContentItem::OutputText {
                 text: "REMOTE_COMPACT_SUMMARY".to_string(),
             }],
+            end_turn: None,
             phase: None,
         },
         codex_protocol::models::ResponseItem::Compaction {
@@ -2983,6 +2985,7 @@ async fn auto_compact_runs_when_reasoning_header_clears_between_turns() {
             content: vec![codex_protocol::models::ContentItem::OutputText {
                 text: "REMOTE_COMPACT_SUMMARY".to_string(),
             }],
+            end_turn: None,
             phase: None,
         },
         codex_protocol::models::ResponseItem::Compaction {

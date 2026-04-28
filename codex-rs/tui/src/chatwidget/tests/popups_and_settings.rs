@@ -248,34 +248,6 @@ async fn plugin_detail_popup_hides_disclosure_for_installed_plugins() {
 }
 
 #[tokio::test]
-async fn plugin_detail_error_popup_skips_disabled_row_numbering() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
-
-    let response = plugins_test_response(vec![plugins_test_curated_marketplace(vec![
-        plugins_test_summary(
-            "plugin-figma",
-            "figma",
-            Some("Figma"),
-            Some("Design handoff."),
-            /*installed*/ false,
-            /*enabled*/ true,
-            PluginInstallPolicy::Available,
-        ),
-    ])]);
-    let cwd = chat.config.cwd.clone();
-    chat.on_plugins_loaded(cwd.to_path_buf(), Ok(response));
-    chat.add_plugins_output();
-    chat.on_plugin_detail_loaded(
-        cwd.to_path_buf(),
-        Err("Failed to load plugin details.".to_string()),
-    );
-
-    let popup = render_bottom_popup(&chat, /*width*/ 100);
-    assert_chatwidget_snapshot!("plugin_detail_error_popup", popup);
-}
-
-#[tokio::test]
 async fn plugins_popup_refresh_preserves_selected_row_position() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
@@ -1692,9 +1664,9 @@ async fn experimental_features_popup_snapshot() {
 
     let features = vec![
         ExperimentalFeatureItem {
-            feature: Feature::JsRepl,
-            name: "JavaScript REPL".to_string(),
-            description: "Enable a persistent Node-backed JavaScript REPL for interactive website debugging and other inline JavaScript execution capabilities.".to_string(),
+            feature: Feature::GhostCommit,
+            name: "Ghost snapshots".to_string(),
+            description: "Capture undo snapshots each turn.".to_string(),
             enabled: false,
         },
         ExperimentalFeatureItem {
@@ -1715,12 +1687,12 @@ async fn experimental_features_popup_snapshot() {
 async fn experimental_features_toggle_saves_on_exit() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    let expected_feature = Feature::JsRepl;
+    let expected_feature = Feature::GhostCommit;
     let view = ExperimentalFeaturesView::new(
         vec![ExperimentalFeatureItem {
             feature: expected_feature,
-            name: "JavaScript REPL".to_string(),
-            description: "Enable a persistent Node-backed JavaScript REPL for interactive website debugging and other inline JavaScript execution capabilities.".to_string(),
+            name: "Ghost snapshots".to_string(),
+            description: "Capture undo snapshots each turn.".to_string(),
             enabled: false,
         }],
         chat.app_event_tx.clone(),
@@ -1749,6 +1721,30 @@ async fn experimental_features_toggle_saves_on_exit() {
 
     let updates = updates.expect("expected UpdateFeatureFlags event");
     assert_eq!(updates, vec![(expected_feature, true)]);
+}
+
+#[tokio::test]
+async fn experimental_popup_shows_js_repl_node_requirement() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    let js_repl_description = FEATURES
+        .iter()
+        .find(|spec| spec.id == Feature::JsRepl)
+        .and_then(|spec| spec.stage.experimental_menu_description())
+        .expect("expected js_repl experimental description");
+    let node_requirement = js_repl_description
+        .split(". ")
+        .find(|sentence| sentence.starts_with("Requires Node >= v"))
+        .map(|sentence| sentence.trim_end_matches(" installed."))
+        .expect("expected js_repl description to mention the Node requirement");
+
+    chat.open_experimental_popup();
+
+    let popup = render_bottom_popup(&chat, /*width*/ 120);
+    assert!(
+        popup.contains(node_requirement),
+        "expected js_repl feature description to mention the required Node version, got:\n{popup}"
+    );
 }
 
 #[tokio::test]

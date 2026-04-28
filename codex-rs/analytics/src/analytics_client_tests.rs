@@ -161,7 +161,11 @@ fn sample_thread_start_response(thread_id: &str, ephemeral: bool, model: &str) -
 }
 
 fn sample_permission_profile() -> AppServerPermissionProfile {
-    CorePermissionProfile::Disabled.into()
+    CorePermissionProfile::from_legacy_sandbox_policy(
+        &SandboxPolicy::DangerFullAccess,
+        &test_path_buf("/tmp"),
+    )
+    .into()
 }
 
 fn sample_app_server_client_metadata() -> CodexAppServerClientMetadata {
@@ -315,10 +319,7 @@ fn sample_turn_resolved_config(turn_id: &str) -> TurnResolvedConfigFact {
         session_source: SessionSource::Exec,
         model: "gpt-5".to_string(),
         model_provider: "openai".to_string(),
-        permission_profile: CorePermissionProfile::from_legacy_sandbox_policy(
-            &SandboxPolicy::new_read_only_policy(),
-        ),
-        permission_profile_cwd: PathBuf::from("/tmp"),
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
         reasoning_effort: None,
         reasoning_summary: None,
         service_tier: None,
