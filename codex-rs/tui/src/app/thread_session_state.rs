@@ -12,10 +12,7 @@ impl App {
 
         let approval_policy = self.config.permissions.approval_policy.value();
         let approvals_reviewer = self.config.approvals_reviewer;
-        let sandbox_policy = self
-            .config
-            .permissions
-            .legacy_sandbox_policy(self.config.cwd.as_path());
+        let sandbox_policy = self.config.permissions.sandbox_policy.get().clone();
         let permission_profile = Some(
             self.chat_widget
                 .config_ref()
@@ -48,10 +45,7 @@ impl App {
         thread_id: ThreadId,
         thread: &Thread,
     ) -> ThreadSessionState {
-        let sandbox_policy = self
-            .config
-            .permissions
-            .legacy_sandbox_policy(self.config.cwd.as_path());
+        let sandbox_policy = self.config.permissions.sandbox_policy.get().clone();
         let mut session = self
             .primary_session_configured
             .clone()
@@ -178,22 +172,16 @@ mod tests {
             codex_config::Constrained::allow_any(AskForApproval::OnRequest);
         app.config.approvals_reviewer = ApprovalsReviewer::AutoReview;
         let expected_sandbox_policy = SandboxPolicy::new_workspace_write_policy();
-        let expected_file_system_policy =
-            FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
-                &expected_sandbox_policy,
-                &main_session.cwd,
-            );
-        let expected_permission_profile = PermissionProfile::from_runtime_permissions(
-            &expected_file_system_policy,
-            NetworkSandboxPolicy::from(&expected_sandbox_policy),
+        let expected_permission_profile = PermissionProfile::from_legacy_sandbox_policy(
+            &expected_sandbox_policy,
+            &main_session.cwd,
         );
         app.chat_widget.handle_thread_session(main_session.clone());
         app.chat_widget
             .set_sandbox_policy(expected_sandbox_policy.clone())
             .expect("set widget sandbox policy");
-        app.config
-            .set_legacy_sandbox_policy(expected_sandbox_policy.clone())
-            .expect("set sandbox policy");
+        app.config.permissions.sandbox_policy =
+            codex_config::Constrained::allow_any(expected_sandbox_policy.clone());
 
         app.sync_active_thread_permission_settings_to_cached_session()
             .await;

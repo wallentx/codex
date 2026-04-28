@@ -41,6 +41,7 @@ fn assistant_msg(text: &str) -> ResponseItem {
         content: vec![ContentItem::OutputText {
             text: text.to_string(),
         }],
+        end_turn: None,
         phase: None,
     }
 }
@@ -59,6 +60,7 @@ fn inter_agent_assistant_msg(text: &str) -> ResponseItem {
         content: vec![ContentItem::OutputText {
             text: serde_json::to_string(&communication).unwrap(),
         }],
+        end_turn: None,
         phase: None,
     }
 }
@@ -78,6 +80,7 @@ fn user_msg(text: &str) -> ResponseItem {
         content: vec![ContentItem::OutputText {
             text: text.to_string(),
         }],
+        end_turn: None,
         phase: None,
     }
 }
@@ -89,6 +92,7 @@ fn user_input_text_msg(text: &str) -> ResponseItem {
         content: vec![ContentItem::InputText {
             text: text.to_string(),
         }],
+        end_turn: None,
         phase: None,
     }
 }
@@ -100,6 +104,7 @@ fn developer_msg(text: &str) -> ResponseItem {
         content: vec![ContentItem::InputText {
             text: text.to_string(),
         }],
+        end_turn: None,
         phase: None,
     }
 }
@@ -114,6 +119,7 @@ fn developer_msg_with_fragments(texts: &[&str]) -> ResponseItem {
                 text: (*text).to_string(),
             })
             .collect(),
+        end_turn: None,
         phase: None,
     }
 }
@@ -194,6 +200,7 @@ fn filters_non_api_messages() {
         content: vec![ContentItem::OutputText {
             text: "ignored".to_string(),
         }],
+        end_turn: None,
         phase: None,
     };
     let reasoning = reasoning_msg("thinking...");
@@ -224,6 +231,7 @@ fn filters_non_api_messages() {
                 content: vec![ContentItem::OutputText {
                     text: "hi".to_string()
                 }],
+                end_turn: None,
                 phase: None,
             },
             ResponseItem::Message {
@@ -232,6 +240,7 @@ fn filters_non_api_messages() {
                 content: vec![ContentItem::OutputText {
                     text: "hello".to_string()
                 }],
+                end_turn: None,
                 phase: None,
             }
         ]
@@ -381,6 +390,7 @@ fn for_prompt_strips_images_when_model_does_not_support_images() {
                     text: "caption".to_string(),
                 },
             ],
+            end_turn: None,
             phase: None,
         },
         ResponseItem::FunctionCall {
@@ -443,6 +453,7 @@ fn for_prompt_strips_images_when_model_does_not_support_images() {
                     text: "caption".to_string(),
                 },
             ],
+            end_turn: None,
             phase: None,
         },
         ResponseItem::FunctionCall {
@@ -501,6 +512,7 @@ fn for_prompt_strips_images_when_model_does_not_support_images() {
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
         ],
+        end_turn: None,
         phase: None,
     }]);
     let preserved = with_images.for_prompt(&modalities);
@@ -528,6 +540,7 @@ fn for_prompt_preserves_image_generation_calls_when_images_are_supported() {
             content: vec![ContentItem::InputText {
                 text: "hi".to_string(),
             }],
+            end_turn: None,
             phase: None,
         },
     ]);
@@ -547,6 +560,7 @@ fn for_prompt_preserves_image_generation_calls_when_images_are_supported() {
                 content: vec![ContentItem::InputText {
                     text: "hi".to_string(),
                 }],
+                end_turn: None,
                 phase: None,
             }
         ]
@@ -562,6 +576,7 @@ fn for_prompt_clears_image_generation_result_when_images_are_unsupported() {
             content: vec![ContentItem::InputText {
                 text: "generate a lobster".to_string(),
             }],
+            end_turn: None,
             phase: None,
         },
         ResponseItem::ImageGenerationCall {
@@ -581,6 +596,7 @@ fn for_prompt_clears_image_generation_result_when_images_are_unsupported() {
                 content: vec![ContentItem::InputText {
                     text: "generate a lobster".to_string(),
                 }],
+                end_turn: None,
                 phase: None,
             },
             ResponseItem::ImageGenerationCall {
@@ -742,6 +758,7 @@ fn replace_last_turn_images_does_not_touch_user_images() {
             image_url: "data:image/png;base64,AAA".to_string(),
             detail: Some(DEFAULT_IMAGE_DETAIL),
         }],
+        end_turn: None,
         phase: None,
     }];
     let mut history = create_history_with_items(items.clone());
@@ -1673,6 +1690,7 @@ fn image_data_url_payload_does_not_dominate_message_estimate() {
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
         ],
+        end_turn: None,
         phase: None,
     };
     let text_only_item = ResponseItem::Message {
@@ -1681,6 +1699,7 @@ fn image_data_url_payload_does_not_dominate_message_estimate() {
         content: vec![ContentItem::InputText {
             text: "Here is the screenshot".to_string(),
         }],
+        end_turn: None,
         phase: None,
     };
 
@@ -1754,6 +1773,7 @@ fn non_base64_image_urls_are_unchanged() {
             image_url: "https://example.com/foo.png".to_string(),
             detail: Some(DEFAULT_IMAGE_DETAIL),
         }],
+        end_turn: None,
         phase: None,
     };
     let function_output_item = ResponseItem::FunctionCallOutput {
@@ -1785,6 +1805,7 @@ fn data_url_without_base64_marker_is_unchanged() {
             image_url: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'/>".to_string(),
             detail: Some(DEFAULT_IMAGE_DETAIL),
         }],
+        end_turn: None,
         phase: None,
     };
 
@@ -1825,6 +1846,7 @@ fn mixed_case_data_url_markers_are_adjusted() {
             image_url,
             detail: Some(DEFAULT_IMAGE_DETAIL),
         }],
+        end_turn: None,
         phase: None,
     };
 
@@ -1857,6 +1879,7 @@ fn multiple_inline_images_apply_multiple_fixed_costs() {
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
         ],
+        end_turn: None,
         phase: None,
     };
 
@@ -1939,6 +1962,7 @@ fn text_only_items_unchanged() {
         content: vec![ContentItem::OutputText {
             text: "Hello world, this is a response.".to_string(),
         }],
+        end_turn: None,
         phase: None,
     };
 

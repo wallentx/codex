@@ -3,9 +3,7 @@ use crate::config::test_config;
 use crate::rollout::RolloutRecorder;
 use crate::session::session::SessionSettingsUpdate;
 use crate::session::tests::make_session_and_context;
-use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::tasks::interrupted_turn_history_marker;
-use codex_features::Feature;
 use codex_models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::models::ContentItem;
@@ -30,6 +28,7 @@ fn user_msg(text: &str) -> ResponseItem {
         content: vec![ContentItem::OutputText {
             text: text.to_string(),
         }],
+        end_turn: None,
         phase: None,
     }
 }
@@ -40,6 +39,7 @@ fn assistant_msg(text: &str) -> ResponseItem {
         content: vec![ContentItem::OutputText {
             text: text.to_string(),
         }],
+        end_turn: None,
         phase: None,
     }
 }
@@ -56,16 +56,6 @@ fn disabled_environment_manager_for_tests() -> Arc<codex_exec_server::Environmen
             local_runtime_paths: runtime_paths,
         },
     ))
-}
-
-fn contextual_user_interrupted_marker() -> ResponseItem {
-    interrupted_turn_history_marker(InterruptedTurnHistoryMarker::ContextualUser)
-        .expect("contextual-user interrupted marker should be enabled")
-}
-
-fn developer_interrupted_marker() -> ResponseItem {
-    interrupted_turn_history_marker(InterruptedTurnHistoryMarker::Developer)
-        .expect("developer interrupted marker should be enabled")
 }
 
 #[test]
@@ -456,17 +446,12 @@ fn interrupted_fork_snapshot_appends_interrupt_boundary() {
 
     assert_eq!(
         serde_json::to_value(
-            append_interrupted_boundary(
-                committed_history,
-                /*turn_id*/ None,
-                InterruptedTurnHistoryMarker::ContextualUser,
-            )
-            .get_rollout_items()
+            append_interrupted_boundary(committed_history, /*turn_id*/ None).get_rollout_items()
         )
         .expect("serialize interrupted fork history"),
         serde_json::to_value(vec![
             RolloutItem::ResponseItem(user_msg("hello")),
-            RolloutItem::ResponseItem(contextual_user_interrupted_marker()),
+            RolloutItem::ResponseItem(interrupted_turn_history_marker()),
             RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: None,
                 reason: TurnAbortReason::Interrupted,
@@ -478,16 +463,11 @@ fn interrupted_fork_snapshot_appends_interrupt_boundary() {
     );
     assert_eq!(
         serde_json::to_value(
-            append_interrupted_boundary(
-                InitialHistory::New,
-                /*turn_id*/ None,
-                InterruptedTurnHistoryMarker::ContextualUser,
-            )
-            .get_rollout_items()
+            append_interrupted_boundary(InitialHistory::New, /*turn_id*/ None).get_rollout_items()
         )
         .expect("serialize interrupted empty fork history"),
         serde_json::to_value(vec![
-            RolloutItem::ResponseItem(contextual_user_interrupted_marker()),
+            RolloutItem::ResponseItem(interrupted_turn_history_marker()),
             RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: None,
                 reason: TurnAbortReason::Interrupted,
@@ -500,59 +480,11 @@ fn interrupted_fork_snapshot_appends_interrupt_boundary() {
 }
 
 #[test]
-fn disabled_interrupted_fork_snapshot_appends_only_interrupt_event() {
-    let committed_history =
-        InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("hello"))]);
-
-    assert_eq!(
-        serde_json::to_value(
-            append_interrupted_boundary(
-                committed_history,
-                /*turn_id*/ None,
-                InterruptedTurnHistoryMarker::Disabled,
-            )
-            .get_rollout_items()
-        )
-        .expect("serialize disabled interrupted fork history"),
-        serde_json::to_value(vec![
-            RolloutItem::ResponseItem(user_msg("hello")),
-            RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
-                turn_id: None,
-                reason: TurnAbortReason::Interrupted,
-                completed_at: None,
-                duration_ms: None,
-            })),
-        ])
-        .expect("serialize expected disabled interrupted fork history"),
-    );
-    assert_eq!(
-        serde_json::to_value(
-            append_interrupted_boundary(
-                InitialHistory::New,
-                /*turn_id*/ None,
-                InterruptedTurnHistoryMarker::Disabled,
-            )
-            .get_rollout_items()
-        )
-        .expect("serialize disabled interrupted empty fork history"),
-        serde_json::to_value(vec![RolloutItem::EventMsg(EventMsg::TurnAborted(
-            TurnAbortedEvent {
-                turn_id: None,
-                reason: TurnAbortReason::Interrupted,
-                completed_at: None,
-                duration_ms: None,
-            },
-        ))])
-        .expect("serialize expected disabled interrupted empty fork history"),
-    );
-}
-
-#[test]
 fn interrupted_snapshot_is_not_mid_turn() {
     let interrupted_history = InitialHistory::Forked(vec![
         RolloutItem::ResponseItem(user_msg("hello")),
         RolloutItem::ResponseItem(assistant_msg("partial")),
-        RolloutItem::ResponseItem(contextual_user_interrupted_marker()),
+        RolloutItem::ResponseItem(interrupted_turn_history_marker()),
         RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some("turn-1".to_string()),
             reason: TurnAbortReason::Interrupted,
@@ -568,24 +500,6 @@ fn interrupted_snapshot_is_not_mid_turn() {
             active_turn_id: None,
             active_turn_start_index: None,
         },
-    );
-}
-
-#[test]
-fn multi_agent_v2_interrupted_marker_uses_developer_input_message() {
-    let marker = developer_interrupted_marker();
-
-    let ResponseItem::Message { role, content, .. } = marker else {
-        panic!("expected interrupted marker to be a message");
-    };
-    assert_eq!(role, "developer");
-    assert!(
-        matches!(
-            content.as_slice(),
-            [ContentItem::InputText { text }]
-                if text.contains(crate::context::TurnAborted::INTERRUPTED_DEVELOPER_GUIDANCE)
-        ),
-        "expected interrupted marker to use developer InputText content"
     );
 }
 
@@ -704,10 +618,9 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
         .into_iter()
         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
         .collect();
-    let interrupted_marker_json = serde_json::to_value(RolloutItem::ResponseItem(
-        contextual_user_interrupted_marker(),
-    ))
-    .expect("serialize interrupted marker");
+    let interrupted_marker_json =
+        serde_json::to_value(RolloutItem::ResponseItem(interrupted_turn_history_marker()))
+            .expect("serialize interrupted marker");
     let interrupted_abort_json = serde_json::to_value(RolloutItem::EventMsg(
         EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: expected_turn_id,
@@ -896,10 +809,9 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         .into_iter()
         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
         .collect();
-    let interrupted_marker_json = serde_json::to_value(RolloutItem::ResponseItem(
-        contextual_user_interrupted_marker(),
-    ))
-    .expect("serialize interrupted marker");
+    let interrupted_marker_json =
+        serde_json::to_value(RolloutItem::ResponseItem(interrupted_turn_history_marker()))
+            .expect("serialize interrupted marker");
     assert_eq!(
         forked_rollout_items
             .iter()
@@ -960,97 +872,4 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
             .count(),
         1,
     );
-}
-
-#[tokio::test]
-async fn resumed_thread_activates_paused_goal_and_continues_on_request() -> anyhow::Result<()> {
-    let temp_dir = tempdir().expect("tempdir");
-    let mut config = test_config().await;
-    config.codex_home = temp_dir.path().join("codex-home").abs();
-    config.cwd = config.codex_home.abs();
-    config
-        .features
-        .enable(Feature::Goals)
-        .expect("goals should be enableable in tests");
-    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
-
-    let auth_manager =
-        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
-    let manager = ThreadManager::new(
-        &config,
-        auth_manager.clone(),
-        SessionSource::Exec,
-        CollaborationModesConfig::default(),
-        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
-        /*analytics_events_client*/ None,
-    );
-
-    let source = manager
-        .resume_thread_with_history(
-            config.clone(),
-            InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("keep working"))]),
-            auth_manager.clone(),
-            /*persist_extended_history*/ false,
-            /*parent_trace*/ None,
-        )
-        .await
-        .expect("create source thread");
-    let source_path = source
-        .thread
-        .rollout_path()
-        .expect("source rollout path should exist");
-    source.thread.flush_rollout().await?;
-    let state_db = source
-        .thread
-        .state_db()
-        .expect("source thread should have a state db");
-    state_db
-        .replace_thread_goal(
-            source.thread_id,
-            "Keep working until the task is done",
-            codex_state::ThreadGoalStatus::Paused,
-            /*token_budget*/ None,
-        )
-        .await?;
-    manager.remove_thread(&source.thread_id).await;
-
-    let resumed = manager
-        .resume_thread_from_rollout(
-            config,
-            source_path,
-            auth_manager,
-            /*parent_trace*/ None,
-        )
-        .await
-        .expect("resume source thread");
-    let goal = state_db
-        .get_thread_goal(resumed.thread_id)
-        .await?
-        .expect("goal should still exist after resume");
-    assert_eq!(codex_state::ThreadGoalStatus::Active, goal.status);
-    assert!(
-        resumed
-            .thread
-            .codex
-            .session
-            .active_turn
-            .lock()
-            .await
-            .is_none()
-    );
-
-    resumed.thread.continue_active_goal_if_idle().await?;
-    assert!(
-        resumed
-            .thread
-            .codex
-            .session
-            .active_turn
-            .lock()
-            .await
-            .is_some()
-    );
-
-    resumed.thread.shutdown_and_wait().await?;
-    Ok(())
 }

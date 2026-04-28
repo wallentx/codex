@@ -127,8 +127,6 @@ async fn external_agent_config_import_sends_completion_notification_after_pendin
 -> Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::create_dir_all(codex_home.path().join(".claude"))?;
-    // This test only needs a pending non-local plugin import. Use an invalid
-    // source so the background completion path cannot make a real network clone.
     std::fs::write(
         codex_home.path().join(".claude").join("settings.json"),
         r#"{
@@ -137,7 +135,7 @@ async fn external_agent_config_import_sends_completion_notification_after_pendin
   },
   "extraKnownMarketplaces": {
     "acme-tools": {
-      "source": "not a valid marketplace source"
+      "source": "owner/debug-marketplace"
     }
   }
 }"#,

@@ -46,8 +46,6 @@ members = [
     "login",
     "codex-mcp",
     "mcp-server",
-    "memories/read",
-    "memories/write",
     "model-provider-info",
     "models-manager",
     "network-proxy",
@@ -68,6 +66,7 @@ members = [
     "v8-poc",
     "utils/absolute-path",
     "utils/cargo-bin",
+    "utils/file-lock",
     "git-utils",
     "utils/cache",
     "utils/image",
@@ -104,6 +103,7 @@ resolver = "2"
 
 [workspace.package]
 version = "0.126.0-alpha.8"
+
 # Track the edition for all workspace crates in one place. Individual
 # crates can still override this value, but keeping it here means new
 # crates created with `cargo new -w ...` automatically inherit the 2024
@@ -155,8 +155,6 @@ codex-keyring-store = { path = "keyring-store" }
 codex-linux-sandbox = { path = "linux-sandbox" }
 codex-lmstudio = { path = "lmstudio" }
 codex-login = { path = "login" }
-codex-memories-read = { path = "memories/read" }
-codex-memories-write = { path = "memories/write" }
 codex-mcp = { path = "codex-mcp" }
 codex-mcp-server = { path = "mcp-server" }
 codex-model-provider-info = { path = "model-provider-info" }
@@ -193,6 +191,7 @@ codex-utils-cache = { path = "utils/cache" }
 codex-utils-cargo-bin = { path = "utils/cargo-bin" }
 codex-utils-cli = { path = "utils/cli" }
 codex-utils-elapsed = { path = "utils/elapsed" }
+codex-utils-file-lock = { path = "utils/file-lock" }
 codex-utils-fuzzy-match = { path = "utils/fuzzy-match" }
 codex-utils-home-dir = { path = "utils/home-dir" }
 codex-utils-image = { path = "utils/image" }
@@ -383,7 +382,7 @@ unicode-width = "0.2"
 url = "2"
 urlencoding = "2.1"
 uuid = "1"
-v8 = "=146.4.0"
+v8 = "=146.9.0"
 vt100 = "0.16.2"
 walkdir = "2.5.0"
 webbrowser = "1.0"

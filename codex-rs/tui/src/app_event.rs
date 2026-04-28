@@ -21,7 +21,6 @@ use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
 use codex_app_server_protocol::SkillsListResponse;
-use codex_app_server_protocol::ThreadGoalStatus;
 use codex_file_search::FileMatch;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelPreset;
@@ -53,12 +52,6 @@ use crate::history_cell::HistoryCell;
 pub(crate) enum RealtimeAudioDeviceKind {
     Microphone,
     Speaker,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ThreadGoalSetMode {
-    ConfirmIfExists,
-    ReplaceExisting,
 }
 
 impl RealtimeAudioDeviceKind {
@@ -176,12 +169,6 @@ pub(crate) enum AppEvent {
     /// bubbling channels through layers of widgets.
     CodexOp(Op),
 
-    /// Approve one retry of a recent auto-review denial selected in the TUI.
-    ApproveRecentAutoReviewDenial {
-        thread_id: ThreadId,
-        id: String,
-    },
-
     /// Kick off an asynchronous file search for the given query (text after
     /// the `@`). Previous searches may be cancelled by the app layer so there
     /// is at most one in-flight search.
@@ -198,29 +185,6 @@ pub(crate) enum AppEvent {
     /// Refresh account rate limits in the background.
     RefreshRateLimits {
         origin: RateLimitRefreshOrigin,
-    },
-
-    /// Open the current thread goal summary/action menu.
-    OpenThreadGoalMenu {
-        thread_id: ThreadId,
-    },
-
-    /// Set or replace the current thread goal objective.
-    SetThreadGoalObjective {
-        thread_id: ThreadId,
-        objective: String,
-        mode: ThreadGoalSetMode,
-    },
-
-    /// Pause or unpause the current thread goal.
-    SetThreadGoalStatus {
-        thread_id: ThreadId,
-        status: ThreadGoalStatus,
-    },
-
-    /// Clear the current thread goal.
-    ClearThreadGoal {
-        thread_id: ThreadId,
     },
 
     /// Result of refreshing rate limits.
