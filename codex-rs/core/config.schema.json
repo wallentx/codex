@@ -36,10 +36,6 @@
         "$ref": "#/definitions/AgentRoleToml"
       },
       "properties": {
-        "interrupt_message": {
-          "description": "Whether to record a model-visible message when an agent turn is interrupted. Defaults to true.",
-          "type": "boolean"
-        },
         "job_max_runtime_seconds": {
           "description": "Default maximum runtime in seconds for agent job workers.",
           "format": "uint64",
@@ -400,9 +396,6 @@
             "enable_fanout": {
               "type": "boolean"
             },
-            "enable_mcp_apps": {
-              "type": "boolean"
-            },
             "enable_request_compression": {
               "type": "boolean"
             },
@@ -424,7 +417,7 @@
             "fast_mode": {
               "type": "boolean"
             },
-            "goals": {
+            "general_analytics": {
               "type": "boolean"
             },
             "guardian_approval": {
@@ -588,6 +581,16 @@
         },
         "include_permissions_instructions": {
           "type": "boolean"
+        },
+        "js_repl_node_module_dirs": {
+          "description": "Ordered list of directories to search for Node modules in `js_repl`.",
+          "items": {
+            "$ref": "#/definitions/AbsolutePathBuf"
+          },
+          "type": "array"
+        },
+        "js_repl_node_path": {
+          "$ref": "#/definitions/AbsolutePathBuf"
         },
         "model": {
           "type": "string"
@@ -766,16 +769,16 @@
       "additionalProperties": false,
       "properties": {
         "disable_warnings": {
-          "description": "Legacy no-op setting retained for compatibility.",
+          "description": "Disable all ghost snapshot warning events.",
           "type": "boolean"
         },
         "ignore_large_untracked_dirs": {
-          "description": "Legacy no-op setting retained for compatibility.",
+          "description": "Ignore untracked directories that contain this many files or more. (Still emits a warning unless warnings are disabled.)",
           "format": "int64",
           "type": "integer"
         },
         "ignore_large_untracked_files": {
-          "description": "Legacy no-op setting retained for compatibility.",
+          "description": "Exclude untracked files larger than this many bytes from ghost snapshots.",
           "format": "int64",
           "type": "integer"
         }
@@ -1309,17 +1312,6 @@
         },
         "hide_spawn_agent_metadata": {
           "type": "boolean"
-        },
-        "max_concurrent_threads_per_session": {
-          "format": "uint",
-          "minimum": 1.0,
-          "type": "integer"
-        },
-        "root_agent_usage_hint_text": {
-          "type": "string"
-        },
-        "subagent_usage_hint_text": {
-          "type": "string"
         },
         "usage_hint_enabled": {
           "type": "boolean"
@@ -2100,42 +2092,6 @@
       },
       "type": "object"
     },
-    "ThreadStoreToml": {
-      "oneOf": [
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "local"
-              ],
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "endpoint": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "remote"
-              ],
-              "type": "string"
-            }
-          },
-          "required": [
-            "endpoint",
-            "type"
-          ],
-          "type": "object"
-        }
-      ]
-    },
     "ToolSuggestConfig": {
       "additionalProperties": false,
       "properties": {
@@ -2275,7 +2231,7 @@
         },
         "terminal_title": {
           "default": null,
-          "description": "Ordered list of terminal title item identifiers.\n\nWhen set, the TUI renders the selected items into the terminal window/tab title. When unset, the TUI defaults to: `activity` and `project`. The `activity` item spins while working and shows an action-required message when blocked on the user.",
+          "description": "Ordered list of terminal title item identifiers.\n\nWhen set, the TUI renders the selected items into the terminal window/tab title. When unset, the TUI defaults to: `spinner` and `project`.",
           "items": {
             "type": "string"
           },
@@ -2539,14 +2495,6 @@
       "description": "Experimental / do not use. When set, app-server fetches thread-scoped config from a remote service at this endpoint.",
       "type": "string"
     },
-    "experimental_thread_store": {
-      "allOf": [
-        {
-          "$ref": "#/definitions/ThreadStoreToml"
-        }
-      ],
-      "description": "Experimental / do not use. Selects the thread store implementation."
-    },
     "experimental_thread_store_endpoint": {
       "description": "Experimental / do not use. When set, app-server uses a remote thread store at this endpoint instead of the local filesystem/SQLite store.",
       "type": "string"
@@ -2616,9 +2564,6 @@
         "enable_fanout": {
           "type": "boolean"
         },
-        "enable_mcp_apps": {
-          "type": "boolean"
-        },
         "enable_request_compression": {
           "type": "boolean"
         },
@@ -2640,7 +2585,7 @@
         "fast_mode": {
           "type": "boolean"
         },
-        "goals": {
+        "general_analytics": {
           "type": "boolean"
         },
         "guardian_approval": {
@@ -2830,7 +2775,7 @@
         }
       ],
       "default": null,
-      "description": "Compatibility-only settings retained so legacy `ghost_snapshot` config still loads."
+      "description": "Settings for ghost snapshots (used for undo)."
     },
     "hide_agent_reasoning": {
       "description": "When set to `true`, `AgentReasoning` events will be hidden from the UI/output. Defaults to `false`.",
@@ -2868,6 +2813,21 @@
     "instructions": {
       "description": "System instructions.",
       "type": "string"
+    },
+    "js_repl_node_module_dirs": {
+      "description": "Ordered list of directories to search for Node modules in `js_repl`.",
+      "items": {
+        "$ref": "#/definitions/AbsolutePathBuf"
+      },
+      "type": "array"
+    },
+    "js_repl_node_path": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AbsolutePathBuf"
+        }
+      ],
+      "description": "Optional absolute path to the Node runtime used by `js_repl`."
     },
     "log_dir": {
       "allOf": [

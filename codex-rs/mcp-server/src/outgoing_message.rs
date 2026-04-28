@@ -231,10 +231,10 @@ mod tests {
 
     use anyhow::Result;
     use codex_protocol::ThreadId;
-    use codex_protocol::models::PermissionProfile;
     use codex_protocol::openai_models::ReasoningEffort;
     use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::SandboxPolicy;
     use codex_protocol::protocol::SessionConfiguredEvent;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
@@ -304,7 +304,8 @@ mod tests {
                 service_tier: None,
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
-                permission_profile: PermissionProfile::read_only(),
+                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                permission_profile: None,
                 cwd: test_path_buf("/home/user/project").abs(),
                 reasoning_effort: Some(ReasoningEffort::default()),
                 history_log_id: 1,
@@ -348,7 +349,8 @@ mod tests {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
-            permission_profile: PermissionProfile::read_only(),
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            permission_profile: None,
             cwd: test_path_buf("/home/user/project").abs(),
             reasoning_effort: Some(ReasoningEffort::default()),
             history_log_id: 1,
@@ -387,7 +389,9 @@ mod tests {
                 "model_provider_id": "test-provider",
                 "approval_policy": "never",
                 "approvals_reviewer": "user",
-                "permission_profile": session_configured_event.permission_profile,
+                "sandbox_policy": {
+                    "type": "read-only"
+                },
                 "cwd": test_path_buf("/home/user/project"),
                 "reasoning_effort": session_configured_event.reasoning_effort,
                 "history_log_id": session_configured_event.history_log_id,
@@ -415,7 +419,8 @@ mod tests {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
-            permission_profile: PermissionProfile::read_only(),
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            permission_profile: None,
             cwd: test_path_buf("/home/user/project").abs(),
             reasoning_effort: Some(ReasoningEffort::default()),
             history_log_id: 1,
@@ -455,7 +460,9 @@ mod tests {
                 "model_provider_id": "test-provider",
                 "approval_policy": "never",
                 "approvals_reviewer": "user",
-                "permission_profile": session_configured_event.permission_profile,
+                "sandbox_policy": {
+                    "type": "read-only"
+                },
                 "cwd": test_path_buf("/home/user/project"),
                 "reasoning_effort": session_configured_event.reasoning_effort,
                 "history_log_id": session_configured_event.history_log_id,

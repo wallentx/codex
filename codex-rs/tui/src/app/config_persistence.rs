@@ -72,15 +72,15 @@ impl App {
                 "Failed to carry forward approval policy override: {err}"
             ));
         }
-        if let Some(policy) = self.runtime_sandbox_policy_override.as_ref()
-            && let Err(err) = config
-                .permissions
-                .set_legacy_sandbox_policy(policy.clone(), config.cwd.as_path())
-        {
-            tracing::warn!(%err, "failed to carry forward sandbox policy override");
-            self.chat_widget.add_error_message(format!(
-                "Failed to carry forward sandbox policy override: {err}"
-            ));
+        if let Some(policy) = self.runtime_sandbox_policy_override.as_ref() {
+            if let Err(err) = config.permissions.sandbox_policy.set(policy.clone()) {
+                tracing::warn!(%err, "failed to carry forward sandbox policy override");
+                self.chat_widget.add_error_message(format!(
+                    "Failed to carry forward sandbox policy override: {err}"
+                ));
+            } else {
+                sync_runtime_permissions_from_legacy_sandbox_policy(config);
+            }
         }
     }
 
@@ -113,15 +113,13 @@ impl App {
         user_message_prefix: &str,
         log_message: &str,
     ) -> bool {
-        if let Err(err) = config
-            .permissions
-            .set_legacy_sandbox_policy(policy, config.cwd.as_path())
-        {
+        if let Err(err) = config.permissions.sandbox_policy.set(policy) {
             tracing::warn!(error = %err, "{log_message}");
             self.chat_widget
                 .add_error_message(format!("{user_message_prefix}: {err}"));
             return false;
         }
+        sync_runtime_permissions_from_legacy_sandbox_policy(config);
 
         true
     }
@@ -300,11 +298,9 @@ impl App {
                 .set_approval_policy(self.config.permissions.approval_policy.value());
         }
         if sandbox_policy_override.is_some()
-            && let Err(err) = self.chat_widget.set_sandbox_policy(
-                self.config
-                    .permissions
-                    .legacy_sandbox_policy(self.config.cwd.as_path()),
-            )
+            && let Err(err) = self
+                .chat_widget
+                .set_sandbox_policy(self.config.permissions.sandbox_policy.get().clone())
         {
             tracing::error!(
                 error = %err,
@@ -314,11 +310,8 @@ impl App {
                 .add_error_message(format!("Failed to enable Auto-review: {err}"));
         }
         if sandbox_policy_override.is_some() {
-            self.runtime_sandbox_policy_override = Some(
-                self.config
-                    .permissions
-                    .legacy_sandbox_policy(self.config.cwd.as_path()),
-            );
+            self.runtime_sandbox_policy_override =
+                Some(self.config.permissions.sandbox_policy.get().clone());
         }
 
         if approval_policy_override.is_some()
@@ -550,13 +543,23 @@ impl App {
     }
 }
 
+fn sync_runtime_permissions_from_legacy_sandbox_policy(config: &mut Config) {
+    let sandbox_policy = config.permissions.sandbox_policy.get();
+    config.permissions.file_system_sandbox_policy =
+        codex_protocol::permissions::FileSystemSandboxPolicy::from_legacy_sandbox_policy(
+            sandbox_policy,
+            &config.cwd,
+        );
+    config.permissions.network_sandbox_policy =
+        codex_protocol::permissions::NetworkSandboxPolicy::from(sandbox_policy);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::test_support::app_enabled_in_effective_config;
     use crate::app::test_support::make_test_app;
     use crate::test_support::PathBufExt;
-    use codex_protocol::models::PermissionProfile;
     use codex_protocol::protocol::Event;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::SessionConfiguredEvent;
@@ -654,7 +657,8 @@ mod tests {
                 service_tier: None,
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
-                permission_profile: PermissionProfile::read_only(),
+                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                permission_profile: None,
                 cwd: next_cwd.clone().abs(),
                 reasoning_effort: None,
                 history_log_id: 0,

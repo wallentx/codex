@@ -22,7 +22,6 @@ use tracing::Span;
 use tracing::warn;
 
 use crate::error_code::INTERNAL_ERROR_CODE;
-use crate::error_code::internal_error;
 use crate::server_request_error::TURN_TRANSITION_PENDING_REQUEST_ERROR_REASON;
 
 #[cfg(test)]
@@ -197,7 +196,7 @@ impl ThreadScopedOutgoingMessageSender {
     pub(crate) async fn send_error(
         &self,
         request_id: ConnectionRequestId,
-        error: impl Into<JSONRPCErrorError>,
+        error: JSONRPCErrorError,
     ) {
         self.outgoing.send_error(request_id, error).await;
     }
@@ -494,7 +493,11 @@ impl OutgoingMessageSender {
                 self.send_error_inner(
                     request_context,
                     request_id,
-                    internal_error(format!("failed to serialize response: {err}")),
+                    JSONRPCErrorError {
+                        code: INTERNAL_ERROR_CODE,
+                        message: format!("failed to serialize response: {err}"),
+                        data: None,
+                    },
                 )
                 .await;
             }
@@ -568,25 +571,11 @@ impl OutgoingMessageSender {
     pub(crate) async fn send_error(
         &self,
         request_id: ConnectionRequestId,
-        error: impl Into<JSONRPCErrorError>,
+        error: JSONRPCErrorError,
     ) {
         let request_context = self.take_request_context(&request_id).await;
-        self.send_error_inner(request_context, request_id, error.into())
+        self.send_error_inner(request_context, request_id, error)
             .await;
-    }
-
-    pub(crate) async fn send_result<T, E>(
-        &self,
-        request_id: ConnectionRequestId,
-        result: std::result::Result<T, E>,
-    ) where
-        T: Serialize,
-        E: Into<JSONRPCErrorError>,
-    {
-        match result {
-            Ok(response) => self.send_response(request_id, response).await,
-            Err(error) => self.send_error(request_id, error).await,
-        }
     }
 
     async fn send_error_inner(
