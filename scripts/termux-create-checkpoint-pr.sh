@@ -114,7 +114,7 @@ if git cat-file -e "origin/${DESTINATION_BRANCH}:.github" 2>/dev/null; then
     git diff --name-only --diff-filter=A "origin/${DESTINATION_BRANCH}" -- .github
   )
   if ((${#added_github_paths[@]})); then
-    git rm -f -- "${added_github_paths[@]}"
+    git rm -f --ignore-unmatch -- "${added_github_paths[@]}"
   fi
 else
   git rm -r --ignore-unmatch .github
