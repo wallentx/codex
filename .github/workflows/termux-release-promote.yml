@@ -156,50 +156,7 @@ jobs:
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
           INPUT_PR_HEAD_SHA: ${{ inputs.pr_head_sha }}
         run: |
-          set -euo pipefail
-          if [[ -n "${INPUT_PR_NUMBER}" || -n "${INPUT_PR_HEAD_SHA}" ]]; then
-            if [[ -z "${INPUT_PR_NUMBER}" || -z "${INPUT_PR_HEAD_SHA}" ]]; then
-              echo "workflow_dispatch inputs pr_number and pr_head_sha must be provided together." >&2
-              exit 1
-            fi
-
-            pr_number="${INPUT_PR_NUMBER}"
-            head_sha="${INPUT_PR_HEAD_SHA}"
-            head_ref=""
-            artifact_name="termux-android-pr-${pr_number}-${head_sha}"
-            {
-              echo "number=${pr_number}"
-              echo "head_sha=${head_sha}"
-              echo "head_ref=${head_ref}"
-              echo "artifact_name=${artifact_name}"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          pr_json="$(
-            gh pr list \
-              --repo "${GITHUB_REPOSITORY}" \
-              --base "${RELEASE_BRANCH}" \
-              --state merged \
-              --limit 100 \
-              --json number,headRefOid,headRefName,mergeCommit \
-              --jq "[.[] | select(.mergeCommit.oid == \"${RELEASE_SHA}\")] | sort_by(.number) | reverse | .[0] // empty"
-          )"
-          if [[ -z "${pr_json}" ]]; then
-            echo "Unable to find merged PR for ${RELEASE_SHA} into ${RELEASE_BRANCH}" >&2
-            exit 1
-          fi
-
-          pr_number="$(jq -r '.number' <<< "${pr_json}")"
-          head_sha="$(jq -r '.headRefOid // .head.sha' <<< "${pr_json}")"
-          head_ref="$(jq -r '.headRefName // .head.ref' <<< "${pr_json}")"
-          artifact_name="termux-android-pr-${pr_number}-${head_sha}"
-          {
-            echo "number=${pr_number}"
-            echo "head_sha=${head_sha}"
-            echo "head_ref=${head_ref}"
-            echo "artifact_name=${artifact_name}"
-          } >> "$GITHUB_OUTPUT"
+          scripts/termux-find-release-pr.sh
 
       - name: Download promoted PR artifact
         if: steps.metadata.outputs.promote == 'true'
@@ -209,49 +166,7 @@ jobs:
           PR_ARTIFACT_NAME: ${{ steps.pr.outputs.artifact_name }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
-          set -euo pipefail
-          find_run_id() {
-            local event="$1"
-            gh run list \
-              --repo "${GITHUB_REPOSITORY}" \
-              --workflow rust-release.yml \
-              --event "${event}" \
-              --status success \
-              --commit "${HEAD_SHA}" \
-              --limit 1 \
-              --json databaseId \
-              --jq '.[0].databaseId // empty'
-          }
-
-          artifact_name="${PR_ARTIFACT_NAME}"
-          run_id="$(find_run_id pull_request)"
-          mkdir -p promoted
-          if [[ -n "${run_id}" ]] && gh run download "${run_id}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --name "${artifact_name}" \
-            --dir promoted; then
-            :
-          else
-            artifact_name="aarch64-linux-android"
-            run_id="$(find_run_id workflow_dispatch)"
-            if [[ -z "${run_id}" ]]; then
-              echo "No successful rust-release run found for ${HEAD_SHA}" >&2
-              exit 1
-            fi
-            gh run download "${run_id}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --name "${artifact_name}" \
-              --dir promoted
-          fi
-
-          ls -la promoted
-          if [[ -f promoted/SHA256SUMS ]]; then
-            (cd promoted && sha256sum -c SHA256SUMS)
-          fi
-          if [[ ! -f promoted/codex-aarch64-linux-android.tar.gz ]]; then
-            echo "Expected promoted/codex-aarch64-linux-android.tar.gz in the downloaded artifact." >&2
-            exit 1
-          fi
+          scripts/termux-download-release-artifact.sh
 
       - name: Create mirrored Termux release
         if: steps.metadata.outputs.promote == 'true'

@@ -306,22 +306,35 @@ jobs:
           conflict_context=""
           fallback_ref=""
           workflow_seed_dir="${RUNNER_TEMP}/termux-release-workflows"
-          mkdir -p "${workflow_seed_dir}"
+          script_seed_dir="${RUNNER_TEMP}/termux-release-scripts"
+          mkdir -p "${workflow_seed_dir}" "${script_seed_dir}"
           cp .github/workflows/rust-release.yml "${workflow_seed_dir}/rust-release.yml"
           cp .github/workflows/shell-tool-mcp.yml "${workflow_seed_dir}/shell-tool-mcp.yml"
           cp .github/workflows/termux-release-checkpoint.yml "${workflow_seed_dir}/termux-release-checkpoint.yml"
           cp .github/workflows/termux-release-deploy.yml "${workflow_seed_dir}/termux-release-deploy.yml"
           cp .github/workflows/termux-release-promote.yml "${workflow_seed_dir}/termux-release-promote.yml"
+          cp scripts/termux-create-checkpoint-pr.sh "${script_seed_dir}/termux-create-checkpoint-pr.sh"
+          cp scripts/termux-download-release-artifact.sh "${script_seed_dir}/termux-download-release-artifact.sh"
+          cp scripts/termux-find-release-pr.sh "${script_seed_dir}/termux-find-release-pr.sh"
 
           seed_release_branch_workflows() {
             # Release branches start from upstream tags, so keep the Termux-owned
-            # CI and deployment workflows authoritative from this automation branch.
+            # CI/deployment workflows and their helper scripts authoritative from
+            # this automation branch.
             mkdir -p .github/workflows
             cp "${workflow_seed_dir}/rust-release.yml" .github/workflows/rust-release.yml
             cp "${workflow_seed_dir}/shell-tool-mcp.yml" .github/workflows/shell-tool-mcp.yml
             cp "${workflow_seed_dir}/termux-release-checkpoint.yml" .github/workflows/termux-release-checkpoint.yml
             cp "${workflow_seed_dir}/termux-release-deploy.yml" .github/workflows/termux-release-deploy.yml
             cp "${workflow_seed_dir}/termux-release-promote.yml" .github/workflows/termux-release-promote.yml
+            mkdir -p scripts
+            cp "${script_seed_dir}/termux-create-checkpoint-pr.sh" scripts/termux-create-checkpoint-pr.sh
+            cp "${script_seed_dir}/termux-download-release-artifact.sh" scripts/termux-download-release-artifact.sh
+            cp "${script_seed_dir}/termux-find-release-pr.sh" scripts/termux-find-release-pr.sh
+            chmod +x \
+              scripts/termux-create-checkpoint-pr.sh \
+              scripts/termux-download-release-artifact.sh \
+              scripts/termux-find-release-pr.sh
           }
 
           is_seeded_release_workflow() {
@@ -330,7 +343,10 @@ jobs:
               .github/workflows/shell-tool-mcp.yml | \
               .github/workflows/termux-release-checkpoint.yml | \
               .github/workflows/termux-release-deploy.yml | \
-              .github/workflows/termux-release-promote.yml)
+              .github/workflows/termux-release-promote.yml | \
+              scripts/termux-create-checkpoint-pr.sh | \
+              scripts/termux-download-release-artifact.sh | \
+              scripts/termux-find-release-pr.sh)
                 return 0
                 ;;
               *)
@@ -361,7 +377,10 @@ jobs:
               .github/workflows/shell-tool-mcp.yml \
               .github/workflows/termux-release-checkpoint.yml \
               .github/workflows/termux-release-deploy.yml \
-              .github/workflows/termux-release-promote.yml
+              .github/workflows/termux-release-promote.yml \
+              scripts/termux-create-checkpoint-pr.sh \
+              scripts/termux-download-release-artifact.sh \
+              scripts/termux-find-release-pr.sh
           }
 
           resolve_workspace_version_conflict() {
@@ -501,7 +520,10 @@ jobs:
               .github/workflows/shell-tool-mcp.yml \
               .github/workflows/termux-release-checkpoint.yml \
               .github/workflows/termux-release-deploy.yml \
-              .github/workflows/termux-release-promote.yml
+              .github/workflows/termux-release-promote.yml \
+              scripts/termux-create-checkpoint-pr.sh \
+              scripts/termux-download-release-artifact.sh \
+              scripts/termux-find-release-pr.sh
             if ! git diff --cached --quiet; then
               git commit -m "Seed Termux release automation"
             fi
@@ -525,6 +547,9 @@ jobs:
               ':!.github/workflows/termux-release-checkpoint.yml' \
               ':!.github/workflows/termux-release-deploy.yml' \
               ':!.github/workflows/termux-release-promote.yml' \
+              ':!scripts/termux-create-checkpoint-pr.sh' \
+              ':!scripts/termux-download-release-artifact.sh' \
+              ':!scripts/termux-find-release-pr.sh' \
               > "${RUNNER_TEMP}/termux.patch"
             if [[ -s "${RUNNER_TEMP}/termux.patch" ]]; then
               if ! git apply --3way "${RUNNER_TEMP}/termux.patch"; then
