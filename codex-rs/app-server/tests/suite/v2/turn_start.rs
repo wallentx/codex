@@ -749,16 +749,12 @@ async fn turn_start_rejects_combined_oversized_text_input() -> Result<()> {
 #[tokio::test]
 async fn turn_start_rejects_invalid_permission_profile_before_starting_turn() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let disallowed_write_root = TempDir::new()?;
+    let unsupported_write_root = TempDir::new()?;
     create_config_toml(
         codex_home.path(),
         "http://localhost/unused",
         "never",
         &BTreeMap::from([(Feature::Personality, true)]),
-    )?;
-    std::fs::write(
-        codex_home.path().join("managed_config.toml"),
-        "sandbox_mode = \"read-only\"\n",
     )?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
@@ -776,7 +772,7 @@ async fn turn_start_rejects_invalid_permission_profile_before_starting_turn() ->
     )
     .await??;
     let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
-    let disallowed_write_root = AbsolutePathBuf::from_absolute_path(disallowed_write_root.path())
+    let unsupported_write_root = AbsolutePathBuf::from_absolute_path(unsupported_write_root.path())
         .expect("tempdir path should be absolute");
 
     let turn_req = mcp
@@ -791,7 +787,7 @@ async fn turn_start_rejects_invalid_permission_profile_before_starting_turn() ->
                 file_system: PermissionProfileFileSystemPermissions::Restricted {
                     entries: vec![FileSystemSandboxEntry {
                         path: FileSystemPath::Path {
-                            path: disallowed_write_root,
+                            path: unsupported_write_root,
                         },
                         access: FileSystemAccessMode::Write,
                     }],
@@ -810,9 +806,9 @@ async fn turn_start_rejects_invalid_permission_profile_before_starting_turn() ->
     assert_eq!(err.error.code, INVALID_REQUEST_ERROR_CODE);
     assert!(err.error.message.contains("invalid turn context override"));
     assert!(
-        err.error.message.contains("allowed set [ReadOnly]"),
-        "unexpected error message: {}",
-        err.error.message
+        err.error
+            .message
+            .contains("filesystem writes outside the workspace root")
     );
     let turn_started = tokio::time::timeout(
         std::time::Duration::from_millis(250),
@@ -1899,6 +1895,7 @@ async fn turn_start_updates_sandbox_and_cwd_between_turns_v2() -> Result<()> {
             approvals_reviewer: None,
             sandbox_policy: Some(codex_app_server_protocol::SandboxPolicy::WorkspaceWrite {
                 writable_roots: vec![first_cwd.try_into()?],
+                read_only_access: codex_app_server_protocol::ReadOnlyAccess::FullAccess,
                 network_access: false,
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,

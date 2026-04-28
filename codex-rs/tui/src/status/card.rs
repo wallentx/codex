@@ -254,11 +254,7 @@ impl StatusHistoryCell {
             ),
             (
                 "sandbox",
-                summarize_sandbox_policy(
-                    &config
-                        .permissions
-                        .legacy_sandbox_policy(config.cwd.as_path()),
-                ),
+                summarize_sandbox_policy(config.permissions.sandbox_policy.get()),
             ),
         ];
         if config.model_provider.wire_api == WireApi::Responses {
@@ -281,10 +277,7 @@ impl StatusHistoryCell {
             .find(|(k, _)| *k == "approval")
             .map(|(_, v)| v.clone())
             .unwrap_or_else(|| "<unknown>".to_string());
-        let sandbox_policy = config
-            .permissions
-            .legacy_sandbox_policy(config.cwd.as_path());
-        let sandbox = match &sandbox_policy {
+        let sandbox = match config.permissions.sandbox_policy.get() {
             SandboxPolicy::DangerFullAccess => "danger-full-access".to_string(),
             SandboxPolicy::ReadOnly { .. } => "read-only".to_string(),
             SandboxPolicy::WorkspaceWrite {
@@ -301,11 +294,12 @@ impl StatusHistoryCell {
             }
         };
         let permissions = if config.permissions.approval_policy.value() == AskForApproval::OnRequest
-            && sandbox_policy == SandboxPolicy::new_workspace_write_policy()
+            && *config.permissions.sandbox_policy.get()
+                == SandboxPolicy::new_workspace_write_policy()
         {
             "Default".to_string()
         } else if config.permissions.approval_policy.value() == AskForApproval::Never
-            && sandbox_policy == SandboxPolicy::DangerFullAccess
+            && *config.permissions.sandbox_policy.get() == SandboxPolicy::DangerFullAccess
         {
             "Full Access".to_string()
         } else {
