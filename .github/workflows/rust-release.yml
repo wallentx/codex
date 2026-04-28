@@ -239,29 +239,42 @@ jobs:
 
           grep -n "^\[workspace.package\]\|^version = " codex-rs/Cargo.toml | head -n 4
 
-      - name: Cache Android NDK
+      - name: Select Android NDK
         if: ${{ matrix.target == 'aarch64-linux-android' }}
-        id: cache-android-ndk
-        uses: actions/cache@v5
-        with:
-          path: ${{ env.ANDROID_HOME }}/ndk/29.0.13113456
-          key: android-ndk-29.0.13113456-${{ runner.os }}
-
-      - name: Install Android NDK
-        if: ${{ matrix.target == 'aarch64-linux-android' && steps.cache-android-ndk.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "Installing Android NDK..."
-          # Install Android NDK using sdkmanager
-          yes | sudo ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses || true
-          sudo ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager "ndk;29.0.13113456"
-      - name: Set Android NDK env
-        if: ${{ matrix.target == 'aarch64-linux-android' }}
-        shell: bash
-        run: |
-          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/29.0.13113456" >> "$GITHUB_ENV"
-          echo "NDK_HOME=${ANDROID_HOME}/ndk/29.0.13113456" >> "$GITHUB_ENV"
+
+          fallback_version="29.0.13113456"
+          ndk_root="${ANDROID_HOME}/ndk"
+          selected_ndk=""
+
+          if [[ -d "${ndk_root}" ]]; then
+            while IFS= read -r candidate; do
+              toolchain="${candidate}/toolchains/llvm/prebuilt/linux-x86_64"
+              if [[ -x "${toolchain}/bin/aarch64-linux-android24-clang" ]]; then
+                selected_ndk="${candidate}"
+                break
+              fi
+            done < <(find "${ndk_root}" -mindepth 1 -maxdepth 1 -type d | sort -Vr)
+          fi
+
+          if [[ -z "${selected_ndk}" ]]; then
+            echo "No usable preinstalled Android NDK found; installing ${fallback_version}"
+            yes | sudo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+            sudo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "ndk;${fallback_version}"
+            selected_ndk="${ndk_root}/${fallback_version}"
+          fi
+
+          if [[ ! -x "${selected_ndk}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" ]]; then
+            echo "Selected Android NDK does not contain a usable aarch64 API 24 clang: ${selected_ndk}" >&2
+            exit 1
+          fi
+
+          echo "Selected Android NDK: ${selected_ndk}"
+          "${selected_ndk}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version
+          echo "ANDROID_NDK_HOME=${selected_ndk}" >> "$GITHUB_ENV"
+          echo "NDK_HOME=${selected_ndk}" >> "$GITHUB_ENV"
       - name: Install Linux bwrap build dependencies
         if: ${{ runner.os == 'Linux' && matrix.target != 'aarch64-linux-android' }}
         shell: bash
