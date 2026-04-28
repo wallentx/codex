@@ -77,7 +77,6 @@ use codex_protocol::config_types::Verbosity as VerbosityConfig;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
-use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::W3cTraceContext;
@@ -99,7 +98,6 @@ use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use tracing::trace;
 use tracing::warn;
@@ -567,7 +565,7 @@ impl ModelClient {
         }
         if matches!(
             self.state.session_source,
-            SessionSource::Internal(InternalSessionSource::MemoryConsolidation)
+            SessionSource::SubAgent(SubAgentSource::MemoryConsolidation)
         ) {
             extra_headers.insert(
                 X_OPENAI_MEMGEN_REQUEST_HEADER,
@@ -1234,8 +1232,7 @@ impl ModelClientSession {
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
                 )) if status == StatusCode::UNAUTHORIZED => {
-                    inference_trace_attempt
-                        .record_failed(&unauthorized_transport, /*output_items*/ &[]);
+                    inference_trace_attempt.record_failed(&unauthorized_transport);
                     pending_retry = PendingUnauthorizedRetry::from_recovery(
                         handle_unauthorized(
                             unauthorized_transport,
@@ -1248,7 +1245,7 @@ impl ModelClientSession {
                 }
                 Err(err) => {
                     let err = map_api_error(err);
-                    inference_trace_attempt.record_failed(&err, /*output_items*/ &[]);
+                    inference_trace_attempt.record_failed(&err);
                     return Err(err);
                 }
             }
@@ -1375,7 +1372,7 @@ impl ModelClientSession {
                 .await
                 .map_err(|err| {
                     let err = map_api_error(err);
-                    inference_trace_attempt.record_failed(&err, /*output_items*/ &[]);
+                    inference_trace_attempt.record_failed(&err);
                     err
                 })?;
             let (stream, last_request_rx) = map_response_stream(
@@ -1597,23 +1594,15 @@ fn build_responses_headers(
 }
 
 fn subagent_header_value(session_source: &SessionSource) -> Option<String> {
-    match session_source {
-        SessionSource::SubAgent(subagent_source) => match subagent_source {
-            SubAgentSource::Review => Some("review".to_string()),
-            SubAgentSource::Compact => Some("compact".to_string()),
-            SubAgentSource::MemoryConsolidation => Some("memory_consolidation".to_string()),
-            SubAgentSource::ThreadSpawn { .. } => Some("collab_spawn".to_string()),
-            SubAgentSource::Other(label) => Some(label.clone()),
-        },
-        SessionSource::Internal(InternalSessionSource::MemoryConsolidation) => {
-            Some("memory_consolidation".to_string())
-        }
-        SessionSource::Cli
-        | SessionSource::VSCode
-        | SessionSource::Exec
-        | SessionSource::Mcp
-        | SessionSource::Custom(_)
-        | SessionSource::Unknown => None,
+    let SessionSource::SubAgent(subagent_source) = session_source else {
+        return None;
+    };
+    match subagent_source {
+        SubAgentSource::Review => Some("review".to_string()),
+        SubAgentSource::Compact => Some("compact".to_string()),
+        SubAgentSource::MemoryConsolidation => Some("memory_consolidation".to_string()),
+        SubAgentSource::ThreadSpawn { .. } => Some("collab_spawn".to_string()),
+        SubAgentSource::Other(label) => Some(label.clone()),
     }
 }
 
@@ -1627,14 +1616,10 @@ fn parent_thread_id_header_value(session_source: &SessionSource) -> Option<Strin
         | SessionSource::Exec
         | SessionSource::Mcp
         | SessionSource::Custom(_)
-        | SessionSource::Internal(_)
         | SessionSource::SubAgent(_)
         | SessionSource::Unknown => None,
     }
 }
-
-const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 1600;
-const STREAM_DROPPED_REASON: &str = "response stream dropped before provider terminal event";
 
 fn map_response_stream<S>(
     api_stream: S,
@@ -1647,28 +1632,15 @@ where
         + Send
         + 'static,
 {
-    let (tx_event, rx_event) =
-        mpsc::channel::<Result<ResponseEvent>>(RESPONSE_STREAM_CHANNEL_CAPACITY);
+    let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
     let (tx_last_response, rx_last_response) = oneshot::channel::<LastResponse>();
-    let consumer_dropped = CancellationToken::new();
-    let consumer_dropped_for_stream = consumer_dropped.clone();
 
     tokio::spawn(async move {
         let mut logged_error = false;
         let mut tx_last_response = Some(tx_last_response);
         let mut items_added: Vec<ResponseItem> = Vec::new();
         let mut api_stream = api_stream;
-        loop {
-            let event = tokio::select! {
-                _ = consumer_dropped.cancelled() => {
-                    inference_trace_attempt.record_cancelled(STREAM_DROPPED_REASON, &items_added);
-                    return;
-                }
-                event = api_stream.next() => event,
-            };
-            let Some(event) = event else {
-                break;
-            };
+        while let Some(event) = api_stream.next().await {
             match event {
                 Ok(ResponseEvent::OutputItemDone(item)) => {
                     items_added.push(item.clone());
@@ -1677,8 +1649,6 @@ where
                         .await
                         .is_err()
                     {
-                        inference_trace_attempt
-                            .record_cancelled(STREAM_DROPPED_REASON, &items_added);
                         return;
                     }
                 }
@@ -1721,14 +1691,12 @@ where
                 }
                 Ok(event) => {
                     if tx_event.send(Ok(event)).await.is_err() {
-                        inference_trace_attempt
-                            .record_cancelled(STREAM_DROPPED_REASON, &items_added);
                         return;
                     }
                 }
                 Err(err) => {
                     let mapped = map_api_error(err);
-                    inference_trace_attempt.record_failed(&mapped, &items_added);
+                    inference_trace_attempt.record_failed(&mapped);
                     if !logged_error {
                         session_telemetry.see_event_completed_failed(&mapped);
                         logged_error = true;
@@ -1739,17 +1707,9 @@ where
                 }
             }
         }
-        inference_trace_attempt
-            .record_failed("stream closed before response.completed", &items_added);
     });
 
-    (
-        ResponseStream {
-            rx_event,
-            consumer_dropped: consumer_dropped_for_stream,
-        },
-        rx_last_response,
-    )
+    (ResponseStream { rx_event }, rx_last_response)
 }
 
 /// Handles a 401 response by optionally refreshing ChatGPT tokens once.

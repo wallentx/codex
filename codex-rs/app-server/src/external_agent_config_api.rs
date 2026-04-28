@@ -3,7 +3,7 @@ use crate::config::external_agent_config::ExternalAgentConfigMigrationItem as Co
 use crate::config::external_agent_config::ExternalAgentConfigMigrationItemType as CoreMigrationItemType;
 use crate::config::external_agent_config::ExternalAgentConfigService;
 use crate::config::external_agent_config::PendingPluginImport;
-use crate::error_code::internal_error;
+use crate::error_code::INTERNAL_ERROR_CODE;
 use codex_app_server_protocol::ExternalAgentConfigDetectParams;
 use codex_app_server_protocol::ExternalAgentConfigDetectResponse;
 use codex_app_server_protocol::ExternalAgentConfigImportParams;
@@ -12,6 +12,7 @@ use codex_app_server_protocol::ExternalAgentConfigMigrationItemType;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::MigrationDetails;
 use codex_app_server_protocol::PluginsMigration;
+use std::io;
 use std::path::PathBuf;
 
 #[derive(Clone)]
@@ -37,7 +38,7 @@ impl ExternalAgentConfigApi {
                 cwds: params.cwds,
             })
             .await
-            .map_err(|err| internal_error(err.to_string()))?;
+            .map_err(map_io_error)?;
 
         Ok(ExternalAgentConfigDetectResponse {
             items: items
@@ -124,7 +125,7 @@ impl ExternalAgentConfigApi {
                     .collect(),
             )
             .await
-            .map_err(|err| internal_error(err.to_string()))
+            .map_err(map_io_error)
     }
 
     pub(crate) async fn complete_pending_plugin_import(
@@ -138,6 +139,14 @@ impl ExternalAgentConfigApi {
             )
             .await
             .map(|_| ())
-            .map_err(|err| internal_error(err.to_string()))
+            .map_err(map_io_error)
+    }
+}
+
+fn map_io_error(err: io::Error) -> JSONRPCErrorError {
+    JSONRPCErrorError {
+        code: INTERNAL_ERROR_CODE,
+        message: err.to_string(),
+        data: None,
     }
 }

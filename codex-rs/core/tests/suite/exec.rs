@@ -8,7 +8,8 @@ use codex_core::spawn::CODEX_SANDBOX_ENV_VAR;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::error::Result;
 use codex_protocol::exec_output::ExecToolCallOutput;
-use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_sandboxing::SandboxType;
 use codex_sandboxing::get_platform_sandbox;
@@ -51,11 +52,12 @@ where
     };
 
     let policy = SandboxPolicy::new_read_only_policy();
-    let permission_profile = PermissionProfile::from_legacy_sandbox_policy(&policy);
 
     process_exec_tool_call(
         params,
-        &permission_profile,
+        &policy,
+        &FileSystemSandboxPolicy::from(&policy),
+        NetworkSandboxPolicy::from(&policy),
         &cwd,
         &None,
         /*use_legacy_landlock*/ false,

@@ -71,8 +71,7 @@ impl Stage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Feature {
     // Stable.
-    /// Removed compatibility flag retained as a no-op so old configs can
-    /// still parse `undo`.
+    /// Create a ghost commit at each turn.
     GhostCommit,
     /// Enable the default shell tool.
     ShellTool,
@@ -80,13 +79,13 @@ pub enum Feature {
     CodexHooks,
 
     // Experimental
-    /// Removed compatibility flag for the deleted JavaScript REPL feature.
+    /// Enable JavaScript REPL tools backed by a persistent Node kernel.
     JsRepl,
-    /// Enable JavaScript code mode backed by the in-process V8 runtime.
+    /// Enable a minimal JavaScript mode backed by Node's built-in vm runtime.
     CodeMode,
     /// Restrict model-visible tools to code mode entrypoints (`exec`, `wait`).
     CodeModeOnly,
-    /// Removed compatibility flag for the deleted JavaScript REPL tool-only mode.
+    /// Only expose js_repl tools directly to the model.
     JsReplToolsOnly,
     /// Use the single unified PTY-backed exec tool.
     UnifiedExec,
@@ -129,6 +128,8 @@ pub enum Feature {
     CodexGitCommit,
     /// Enable runtime metrics snapshots via a manual reader.
     RuntimeMetrics,
+    /// Enable thread lifecycle analytics emitted via the app-server analytics pipeline.
+    GeneralAnalytics,
     /// Persist rollout metadata to a local SQLite database.
     Sqlite,
     /// Enable startup memory extraction and file-backed memory consolidation.
@@ -147,8 +148,6 @@ pub enum Feature {
     SpawnCsv,
     /// Enable apps.
     Apps,
-    /// Enable MCP apps.
-    EnableMcpApps,
     /// Enable the tool_search tool for apps.
     ToolSearch,
     /// Always defer MCP tools behind tool_search instead of exposing small sets directly.
@@ -188,8 +187,6 @@ pub enum Feature {
     DefaultModeRequestUserInput,
     /// Enable automatic review for approval prompts.
     GuardianApproval,
-    /// Enable persisted thread goals and automatic goal continuation.
-    Goals,
     /// Enable collaboration modes (Plan, Default).
     /// Kept for config backward compatibility; behavior is always collaboration-modes-enabled.
     CollaborationModes,
@@ -393,15 +390,6 @@ impl Features {
                 "tui_app_server" => {
                     continue;
                 }
-                "undo" => {
-                    continue;
-                }
-                "js_repl" => {
-                    continue;
-                }
-                "js_repl_tools_only" => {
-                    continue;
-                }
                 "image_detail_original" => {
                     continue;
                 }
@@ -470,6 +458,10 @@ impl Features {
         }
         if self.enabled(Feature::CodeModeOnly) && !self.enabled(Feature::CodeMode) {
             self.enable(Feature::CodeMode);
+        }
+        if self.enabled(Feature::JsReplToolsOnly) && !self.enabled(Feature::JsRepl) {
+            tracing::warn!("js_repl_tools_only requires js_repl; disabling js_repl_tools_only");
+            self.disable(Feature::JsReplToolsOnly);
         }
     }
 }
@@ -624,7 +616,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::GhostCommit,
         key: "undo",
-        stage: Stage::Removed,
+        stage: Stage::Stable,
         default_enabled: false,
     },
     FeatureSpec {
@@ -654,7 +646,11 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::JsRepl,
         key: "js_repl",
-        stage: Stage::Removed,
+        stage: Stage::Experimental {
+            name: "JavaScript REPL",
+            menu_description: "Enable a persistent Node-backed JavaScript REPL for interactive website debugging and other inline JavaScript execution capabilities. Requires Node >= v22.22.0 installed.",
+            announcement: "NEW: JavaScript REPL is now available in /experimental. Enable it, then start a new chat or restart Codex to use it.",
+        },
         default_enabled: false,
     },
     FeatureSpec {
@@ -672,7 +668,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::JsReplToolsOnly,
         key: "js_repl_tools_only",
-        stage: Stage::Removed,
+        stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
     FeatureSpec {
@@ -715,6 +711,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "runtime_metrics",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::GeneralAnalytics,
+        key: "general_analytics",
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::Sqlite,
@@ -841,12 +843,6 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
-        id: Feature::EnableMcpApps,
-        key: "enable_mcp_apps",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
-    },
-    FeatureSpec {
         id: Feature::ToolSearch,
         key: "tool_search",
         stage: Stage::Stable,
@@ -861,8 +857,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::UnavailableDummyTools,
         key: "unavailable_dummy_tools",
-        stage: Stage::Stable,
-        default_enabled: true,
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::ToolSuggest,
@@ -945,12 +941,6 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "guardian_approval",
         stage: Stage::Stable,
         default_enabled: true,
-    },
-    FeatureSpec {
-        id: Feature::Goals,
-        key: "goals",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::CollaborationModes,

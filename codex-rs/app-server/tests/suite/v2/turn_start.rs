@@ -78,6 +78,7 @@ use std::path::Path;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
+use super::analytics::enable_analytics_capture;
 use super::analytics::mount_analytics_capture;
 use super::analytics::wait_for_analytics_event;
 
@@ -462,7 +463,7 @@ async fn turn_start_tracks_turn_event_analytics() -> Result<()> {
         &server.uri(),
         &server.uri(),
     )?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
+    enable_analytics_capture(&server, codex_home.path()).await?;
 
     let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
@@ -534,6 +535,77 @@ async fn turn_start_tracks_turn_event_analytics() -> Result<()> {
     assert_eq!(event["event_params"]["reasoning_output_tokens"], 0);
     assert_eq!(event["event_params"]["total_tokens"], 0);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_start_does_not_track_turn_event_analytics_without_feature() -> Result<()> {
+    let responses = vec![create_final_assistant_message_sse_response("Done")?];
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+
+    let codex_home = TempDir::new()?;
+    write_mock_responses_config_toml_with_chatgpt_base_url(
+        codex_home.path(),
+        &server.uri(),
+        &server.uri(),
+    )?;
+    let config_path = codex_home.path().join("config.toml");
+    let config_toml = std::fs::read_to_string(&config_path)?;
+    std::fs::write(
+        &config_path,
+        format!("{config_toml}\n[features]\ngeneral_analytics = false\n"),
+    )?;
+    mount_analytics_capture(&server, codex_home.path()).await?;
+
+    let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_req = mcp
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+
+    let turn_req = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id,
+            input: vec![V2UserInput::Text {
+                text: "hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+    let _ = to_response::<TurnStartResponse>(turn_resp)?;
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let turn_event = wait_for_analytics_event(
+        &server,
+        std::time::Duration::from_millis(250),
+        "codex_turn_event",
+    )
+    .await;
+    assert!(
+        turn_event.is_err(),
+        "turn analytics should be gated off when general_analytics is disabled"
+    );
     Ok(())
 }
 
@@ -677,16 +749,12 @@ async fn turn_start_rejects_combined_oversized_text_input() -> Result<()> {
 #[tokio::test]
 async fn turn_start_rejects_invalid_permission_profile_before_starting_turn() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let disallowed_write_root = TempDir::new()?;
+    let unsupported_write_root = TempDir::new()?;
     create_config_toml(
         codex_home.path(),
         "http://localhost/unused",
         "never",
         &BTreeMap::from([(Feature::Personality, true)]),
-    )?;
-    std::fs::write(
-        codex_home.path().join("managed_config.toml"),
-        "sandbox_mode = \"read-only\"\n",
     )?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
@@ -704,7 +772,7 @@ async fn turn_start_rejects_invalid_permission_profile_before_starting_turn() ->
     )
     .await??;
     let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
-    let disallowed_write_root = AbsolutePathBuf::from_absolute_path(disallowed_write_root.path())
+    let unsupported_write_root = AbsolutePathBuf::from_absolute_path(unsupported_write_root.path())
         .expect("tempdir path should be absolute");
 
     let turn_req = mcp
@@ -719,7 +787,7 @@ async fn turn_start_rejects_invalid_permission_profile_before_starting_turn() ->
                 file_system: PermissionProfileFileSystemPermissions::Restricted {
                     entries: vec![FileSystemSandboxEntry {
                         path: FileSystemPath::Path {
-                            path: disallowed_write_root,
+                            path: unsupported_write_root,
                         },
                         access: FileSystemAccessMode::Write,
                     }],
@@ -738,9 +806,9 @@ async fn turn_start_rejects_invalid_permission_profile_before_starting_turn() ->
     assert_eq!(err.error.code, INVALID_REQUEST_ERROR_CODE);
     assert!(err.error.message.contains("invalid turn context override"));
     assert!(
-        err.error.message.contains("allowed set [ReadOnly]"),
-        "unexpected error message: {}",
-        err.error.message
+        err.error
+            .message
+            .contains("filesystem writes outside the workspace root")
     );
     let turn_started = tokio::time::timeout(
         std::time::Duration::from_millis(250),
@@ -1827,6 +1895,7 @@ async fn turn_start_updates_sandbox_and_cwd_between_turns_v2() -> Result<()> {
             approvals_reviewer: None,
             sandbox_policy: Some(codex_app_server_protocol::SandboxPolicy::WorkspaceWrite {
                 writable_roots: vec![first_cwd.try_into()?],
+                read_only_access: codex_app_server_protocol::ReadOnlyAccess::FullAccess,
                 network_access: false,
                 exclude_tmpdir_env_var: false,
                 exclude_slash_tmp: false,

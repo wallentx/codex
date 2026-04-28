@@ -315,10 +315,6 @@ impl App {
             AppEvent::CodexOp(op) => {
                 self.submit_active_thread_op(app_server, op.into()).await?;
             }
-            AppEvent::ApproveRecentAutoReviewDenial { thread_id, id } => {
-                self.chat_widget
-                    .approve_recent_auto_review_denial(thread_id, id);
-            }
             AppEvent::SubmitThreadOp { thread_id, op } => {
                 self.submit_thread_op(app_server, thread_id, op.into())
                     .await?;
@@ -537,24 +533,6 @@ impl App {
             }
             AppEvent::RefreshRateLimits { origin } => {
                 self.refresh_rate_limits(app_server, origin);
-            }
-            AppEvent::OpenThreadGoalMenu { thread_id } => {
-                self.open_thread_goal_menu(app_server, thread_id).await;
-            }
-            AppEvent::SetThreadGoalObjective {
-                thread_id,
-                objective,
-                mode,
-            } => {
-                self.set_thread_goal_objective(app_server, thread_id, objective, mode)
-                    .await;
-            }
-            AppEvent::SetThreadGoalStatus { thread_id, status } => {
-                self.set_thread_goal_status(app_server, thread_id, status)
-                    .await;
-            }
-            AppEvent::ClearThreadGoal { thread_id } => {
-                self.clear_thread_goal(app_server, thread_id).await;
             }
             AppEvent::SendAddCreditsNudgeEmail { credit_type } => {
                 if self
@@ -838,10 +816,7 @@ impl App {
                             /*hint*/ None,
                         ));
 
-                    let policy = self
-                        .config
-                        .permissions
-                        .legacy_sandbox_policy(self.config.cwd.as_path());
+                    let policy = self.config.permissions.sandbox_policy.get().clone();
                     let policy_cwd = self.config.cwd.clone();
                     let command_cwd = self.config.cwd.clone();
                     let env_map: std::collections::HashMap<String, String> =
@@ -1252,11 +1227,8 @@ impl App {
                         .add_error_message(format!("Failed to set sandbox policy: {err}"));
                     return Ok(AppRunControl::Continue);
                 }
-                self.runtime_sandbox_policy_override = Some(
-                    self.config
-                        .permissions
-                        .legacy_sandbox_policy(self.config.cwd.as_path()),
-                );
+                self.runtime_sandbox_policy_override =
+                    Some(self.config.permissions.sandbox_policy.get().clone());
                 self.sync_active_thread_permission_settings_to_cached_session()
                     .await;
 
@@ -1279,10 +1251,7 @@ impl App {
                             std::env::vars().collect();
                         let tx = self.app_event_tx.clone();
                         let logs_base_dir = self.config.codex_home.clone();
-                        let sandbox_policy = self
-                            .config
-                            .permissions
-                            .legacy_sandbox_policy(self.config.cwd.as_path());
+                        let sandbox_policy = self.config.permissions.sandbox_policy.get().clone();
                         Self::spawn_world_writable_scan(
                             cwd,
                             env_map,

@@ -41,12 +41,12 @@ use codex_app_server_protocol::Result as JsonRpcResult;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_arg0::Arg0DispatchPaths;
-use codex_config::CloudRequirementsLoader;
-use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
 use codex_config::RemoteThreadConfigLoader;
 use codex_config::ThreadConfigLoader;
 use codex_core::config::Config;
+use codex_core::config_loader::CloudRequirementsLoader;
+use codex_core::config_loader::LoaderOverrides;
 pub use codex_exec_server::EnvironmentManager;
 pub use codex_exec_server::EnvironmentManagerArgs;
 pub use codex_exec_server::ExecServerRuntimePaths;
@@ -1392,55 +1392,6 @@ mod tests {
             .await
             .expect("typed request should succeed");
         assert_eq!(response.account, None);
-
-        client.shutdown().await.expect("shutdown should complete");
-    }
-
-    #[tokio::test]
-    async fn remote_typed_request_accepts_large_single_frame_response() {
-        let padding = "x".repeat((17 << 20) + 1024);
-        let websocket_url = start_test_remote_server(move |mut websocket| async move {
-            expect_remote_initialize(&mut websocket).await;
-            let JSONRPCMessage::Request(request) = read_websocket_message(&mut websocket).await
-            else {
-                panic!("expected account/read request");
-            };
-            assert_eq!(request.method, "account/read");
-            write_websocket_message(
-                &mut websocket,
-                JSONRPCMessage::Response(JSONRPCResponse {
-                    id: request.id,
-                    result: serde_json::json!({
-                        "account": null,
-                        "requiresOpenaiAuth": false,
-                        "padding": padding,
-                    }),
-                }),
-            )
-            .await;
-            websocket.close(None).await.expect("close should succeed");
-        })
-        .await;
-        let client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
-            .await
-            .expect("remote client should connect");
-
-        let response: GetAccountResponse = client
-            .request_typed(ClientRequest::GetAccount {
-                request_id: RequestId::Integer(1),
-                params: codex_app_server_protocol::GetAccountParams {
-                    refresh_token: false,
-                },
-            })
-            .await
-            .expect("large typed request should succeed");
-        assert_eq!(
-            response,
-            GetAccountResponse {
-                account: None,
-                requires_openai_auth: false,
-            }
-        );
 
         client.shutdown().await.expect("shutdown should complete");
     }
