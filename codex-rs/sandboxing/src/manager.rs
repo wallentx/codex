@@ -13,6 +13,7 @@ use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::ReadOnlyAccess;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::HashMap;
@@ -306,6 +307,7 @@ fn compatibility_workspace_write_policy(
 
     SandboxPolicy::WorkspaceWrite {
         writable_roots,
+        read_only_access: ReadOnlyAccess::FullAccess,
         network_access: network_policy.is_enabled(),
         exclude_tmpdir_env_var: !tmpdir_writable,
         exclude_slash_tmp: !slash_tmp_writable,
