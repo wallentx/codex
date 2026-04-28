@@ -237,8 +237,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   create-release-pr:
-    needs: look-for-newer-release
-    if: needs.look-for-newer-release.outputs.selected == 'true'
+    needs:
+      - look-for-newer-release
+      - cleanup-completed-release-branches
+    if: needs.look-for-newer-release.outputs.selected == 'true' && needs.cleanup-completed-release-branches.result == 'success'
     runs-on: ubuntu-slim
     permissions:
       actions: write
@@ -724,19 +726,15 @@ jobs:
           gh pr edit "${pr_url}" --repo "${GITHUB_REPOSITORY}" --add-label "termux-release" --add-label "release-train"
           echo "pr_url=${pr_url}" >> "$GITHUB_OUTPUT"
 
-  cleanup-old-release-branches:
-    needs:
-      - look-for-newer-release
-      - create-release-pr
-    if: needs.look-for-newer-release.outputs.selected == 'true' && needs.create-release-pr.result == 'success'
+  cleanup-completed-release-branches:
+    needs: look-for-newer-release
+    if: always() && needs.look-for-newer-release.result == 'success'
     runs-on: ubuntu-slim
     permissions:
       contents: write
       pull-requests: read
     env:
       GH_REPO: ${{ github.repository }}
-      CURRENT_RELEASE_TRAIN: ${{ needs.look-for-newer-release.outputs.release_train }}
-      CURRENT_RELEASE_BRANCH: ${{ needs.look-for-newer-release.outputs.release_branch }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -757,29 +755,12 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         uses: wallentx/gh-actions/composite/actions-toolbox@main
 
-      - name: Delete completed old release branches
+      - name: Delete completed release branches
         shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
-
-          release_train_is_older() {
-            local candidate_train="$1"
-            local current_train="$2"
-            local newest_train
-
-            if [[ "${candidate_train}" == "${current_train}" ]]; then
-              return 1
-            fi
-
-            newest_train="$(
-              printf '%s\n%s\n' "${candidate_train}" "${current_train}" \
-                | sort -V \
-                | tail -n 1
-            )"
-            [[ "${newest_train}" == "${current_train}" ]]
-          }
 
           git fetch --prune origin '+refs/heads/release/*:refs/remotes/origin/release/*'
 
@@ -802,17 +783,6 @@ jobs:
 
           for release_ref in "${release_refs[@]}"; do
             release_branch="${release_ref#origin/}"
-            release_train="${release_branch#release/}"
-
-            if [[ "${release_branch}" == "${CURRENT_RELEASE_BRANCH}" ]]; then
-              echo "Keeping ${release_branch}: current release branch."
-              continue
-            fi
-
-            if ! release_train_is_older "${release_train}" "${CURRENT_RELEASE_TRAIN}"; then
-              echo "Keeping ${release_branch}: not older than ${CURRENT_RELEASE_BRANCH}."
-              continue
-            fi
 
             metadata="$(git show "${release_ref}:.github/termux-release.json" 2>/dev/null || true)"
             if [[ -z "${metadata}" ]]; then
@@ -849,7 +819,7 @@ jobs:
               continue
             fi
 
-            echo "Deleting completed old release branch ${release_branch} for ${termux_tag}."
+            echo "Deleting completed release branch ${release_branch} for ${termux_tag}."
             if ! git push origin --delete "${release_branch}"; then
               echo "::warning::Failed to delete ${release_branch}; continuing cleanup."
             fi
