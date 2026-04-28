@@ -370,15 +370,19 @@ jobs:
             upstream_version="$(workspace_version_from_ref "refs/tags/${UPSTREAM_TAG}")"
             if [[ -z "${upstream_version}" ]]; then
               echo "Unable to read workspace package version from refs/tags/${UPSTREAM_TAG}" >&2
-              return 1
+              return 0
             fi
 
-            UPSTREAM_WORKSPACE_VERSION="${upstream_version}" perl -0pi -e '
+            if UPSTREAM_WORKSPACE_VERSION="${upstream_version}" perl -0pi -e '
               my $version = $ENV{"UPSTREAM_WORKSPACE_VERSION"};
               s/<<<<<<<[^\n]*\n(version = ")[^"]+("\n)=======\n\1[^"]+\2>>>>>>>[^\n]*(\n)/$1$version$2$3/s
-                or die "workspace.package version conflict not found\n";
-            ' codex-rs/Cargo.toml
-            git add codex-rs/Cargo.toml
+                or exit 1;
+            ' codex-rs/Cargo.toml; then
+              git add codex-rs/Cargo.toml
+            else
+              echo "codex-rs/Cargo.toml has conflicts beyond the simple workspace version bump; leaving it for the fallback PR."
+              git checkout -m -- codex-rs/Cargo.toml
+            fi
           }
 
           resolve_known_release_train_conflicts() {
