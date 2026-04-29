@@ -26,7 +26,6 @@ mod mcp_server_status;
 mod mcp_tool;
 mod memory_reset;
 mod model_list;
-mod model_provider_capabilities_read;
 mod output_schema;
 mod plan_item;
 mod plugin_install;
@@ -35,8 +34,6 @@ mod plugin_read;
 mod plugin_uninstall;
 mod rate_limits;
 mod realtime_conversation;
-#[cfg(debug_assertions)]
-mod remote_thread_store;
 mod request_permissions;
 mod request_user_input;
 mod review;

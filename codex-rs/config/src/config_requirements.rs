@@ -1,8 +1,8 @@
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::config_types::WebSearchMode;
-use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
 use serde::Serialize;
@@ -84,7 +84,7 @@ impl<T> std::ops::DerefMut for ConstrainedWithSource<T> {
 pub struct ConfigRequirements {
     pub approval_policy: ConstrainedWithSource<AskForApproval>,
     pub approvals_reviewer: ConstrainedWithSource<ApprovalsReviewer>,
-    pub permission_profile: ConstrainedWithSource<PermissionProfile>,
+    pub sandbox_policy: ConstrainedWithSource<SandboxPolicy>,
     pub web_search_mode: ConstrainedWithSource<WebSearchMode>,
     pub feature_requirements: Option<Sourced<FeatureRequirementsToml>>,
     pub managed_hooks: Option<ConstrainedWithSource<ManagedHooksRequirementsToml>>,
@@ -110,8 +110,8 @@ impl Default for ConfigRequirements {
                 Constrained::allow_any_from_default(),
                 /*source*/ None,
             ),
-            permission_profile: ConstrainedWithSource::new(
-                Constrained::allow_any(PermissionProfile::read_only()),
+            sandbox_policy: ConstrainedWithSource::new(
+                Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
                 /*source*/ None,
             ),
             web_search_mode: ConstrainedWithSource::new(
@@ -842,10 +842,10 @@ pub enum ResidencyRequirement {
 
 impl ConfigRequirementsToml {
     pub fn apply_remote_sandbox_config(&mut self, hostname: Option<&str>) {
-        let Some(remote_sandbox_config) = self.remote_sandbox_config.as_ref() else {
+        let Some(hostname) = hostname.and_then(normalize_hostname) else {
             return;
         };
-        let Some(hostname) = hostname.and_then(normalize_hostname) else {
+        let Some(remote_sandbox_config) = self.remote_sandbox_config.as_ref() else {
             return;
         };
         let Some(matched_config) = remote_sandbox_config
@@ -967,8 +967,15 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
             ),
         };
 
-        let default_permission_profile = PermissionProfile::read_only();
-        let permission_profile = match allowed_sandbox_modes {
+        // TODO(gt): `ConfigRequirementsToml` should let the author specify the
+        // default `SandboxPolicy`? Should do this for `AskForApproval` too?
+        //
+        // Currently, we force ReadOnly as the default policy because two of
+        // the other variants (WorkspaceWrite, ExternalSandbox) require
+        // additional parameters. Ultimately, we should expand the config
+        // format to allow specifying those parameters.
+        let default_sandbox_policy = SandboxPolicy::new_read_only_policy();
+        let sandbox_policy = match allowed_sandbox_modes {
             Some(Sourced {
                 value: modes,
                 source: requirement_source,
@@ -977,15 +984,23 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
                     return Err(ConstraintError::InvalidValue {
                         field_name: "allowed_sandbox_modes",
                         candidate: format!("{modes:?}"),
-                        allowed: "must include 'read-only' to allow any PermissionProfile"
-                            .to_string(),
+                        allowed: "must include 'read-only' to allow any SandboxPolicy".to_string(),
                         requirement_source,
                     });
                 };
 
                 let requirement_source_for_error = requirement_source.clone();
-                let constrained = Constrained::new(default_permission_profile, move |candidate| {
-                    let mode = sandbox_mode_requirement_for_permission_profile(candidate);
+                let constrained = Constrained::new(default_sandbox_policy, move |candidate| {
+                    let mode = match candidate {
+                        SandboxPolicy::ReadOnly { .. } => SandboxModeRequirement::ReadOnly,
+                        SandboxPolicy::WorkspaceWrite { .. } => {
+                            SandboxModeRequirement::WorkspaceWrite
+                        }
+                        SandboxPolicy::DangerFullAccess => SandboxModeRequirement::DangerFullAccess,
+                        SandboxPolicy::ExternalSandbox { .. } => {
+                            SandboxModeRequirement::ExternalSandbox
+                        }
+                    };
                     if modes.contains(&mode) {
                         Ok(())
                     } else {
@@ -999,10 +1014,12 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
                 })?;
                 ConstrainedWithSource::new(constrained, Some(requirement_source))
             }
-            None => ConstrainedWithSource::new(
-                Constrained::allow_any(default_permission_profile),
-                /*source*/ None,
-            ),
+            None => {
+                ConstrainedWithSource::new(
+                    Constrained::allow_any(default_sandbox_policy),
+                    /*source*/ None,
+                )
+            }
         };
         let exec_policy = match rules {
             Some(Sourced { value, source }) => {
@@ -1128,7 +1145,7 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
         Ok(ConfigRequirements {
             approval_policy,
             approvals_reviewer,
-            permission_profile,
+            sandbox_policy,
             web_search_mode,
             feature_requirements,
             managed_hooks,
@@ -1142,29 +1159,6 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
     }
 }
 
-pub fn sandbox_mode_requirement_for_permission_profile(
-    permission_profile: &PermissionProfile,
-) -> SandboxModeRequirement {
-    match permission_profile {
-        PermissionProfile::Disabled => SandboxModeRequirement::DangerFullAccess,
-        PermissionProfile::External { .. } => SandboxModeRequirement::ExternalSandbox,
-        PermissionProfile::Managed { .. } => {
-            let file_system_policy = permission_profile.file_system_sandbox_policy();
-            if file_system_policy.has_full_disk_write_access() {
-                SandboxModeRequirement::DangerFullAccess
-            } else if file_system_policy
-                .entries
-                .iter()
-                .any(|entry| entry.access.can_write())
-            {
-                SandboxModeRequirement::WorkspaceWrite
-            } else {
-                SandboxModeRequirement::ReadOnly
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1174,7 +1168,6 @@ mod tests {
     use codex_execpolicy::Evaluation;
     use codex_execpolicy::RuleMatch;
     use codex_protocol::protocol::NetworkAccess;
-    use codex_protocol::protocol::SandboxPolicy;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use codex_utils_absolute_path::AbsolutePathBufGuard;
     use pretty_assertions::assert_eq;
@@ -1188,10 +1181,6 @@ mod tests {
         Ok(AbsolutePathBuf::try_from(
             std::env::temp_dir().join("requirements.toml"),
         )?)
-    }
-
-    fn profile_from_sandbox_policy(sandbox_policy: &SandboxPolicy) -> PermissionProfile {
-        PermissionProfile::from_legacy_sandbox_policy(sandbox_policy)
     }
 
     fn with_unknown_source(toml: ConfigRequirementsToml) -> ConfigRequirementsWithSources {
@@ -1735,10 +1724,8 @@ allowed_approvals_reviewers = ["user"]
         );
         assert_eq!(
             requirements
-                .permission_profile
-                .can_set(&profile_from_sandbox_policy(
-                    &SandboxPolicy::DangerFullAccess,
-                )),
+                .sandbox_policy
+                .can_set(&SandboxPolicy::DangerFullAccess),
             Err(ConstraintError::InvalidValue {
                 field_name: "sandbox_mode",
                 candidate: "DangerFullAccess".into(),
@@ -1816,7 +1803,7 @@ allowed_approvals_reviewers = ["user"]
             Some(source_location.clone())
         );
         assert_eq!(
-            requirements.permission_profile.source,
+            requirements.sandbox_policy.source,
             Some(source_location.clone())
         );
         assert_eq!(
@@ -1882,10 +1869,8 @@ allowed_approvals_reviewers = ["user"]
         );
         assert!(
             requirements
-                .permission_profile
-                .can_set(&profile_from_sandbox_policy(
-                    &SandboxPolicy::new_read_only_policy()
-                ))
+                .sandbox_policy
+                .can_set(&SandboxPolicy::new_read_only_policy())
                 .is_ok()
         );
 
@@ -1967,30 +1952,26 @@ allowed_approvals_reviewers = ["user"]
         let root = if cfg!(windows) { "C:\\repo" } else { "/repo" };
         assert!(
             requirements
-                .permission_profile
-                .can_set(&profile_from_sandbox_policy(
-                    &SandboxPolicy::new_read_only_policy()
-                ))
+                .sandbox_policy
+                .can_set(&SandboxPolicy::new_read_only_policy())
                 .is_ok()
         );
-        let workspace_write_policy = SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![AbsolutePathBuf::from_absolute_path(root)?],
-            network_access: false,
-            exclude_tmpdir_env_var: false,
-            exclude_slash_tmp: false,
-        };
         assert!(
             requirements
-                .permission_profile
-                .can_set(&profile_from_sandbox_policy(&workspace_write_policy))
+                .sandbox_policy
+                .can_set(&SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![AbsolutePathBuf::from_absolute_path(root)?],
+                    read_only_access: Default::default(),
+                    network_access: false,
+                    exclude_tmpdir_env_var: false,
+                    exclude_slash_tmp: false,
+                })
                 .is_ok()
         );
         assert_eq!(
             requirements
-                .permission_profile
-                .can_set(&profile_from_sandbox_policy(
-                    &SandboxPolicy::DangerFullAccess,
-                )),
+                .sandbox_policy
+                .can_set(&SandboxPolicy::DangerFullAccess),
             Err(ConstraintError::InvalidValue {
                 field_name: "sandbox_mode",
                 candidate: "DangerFullAccess".into(),
@@ -2000,12 +1981,10 @@ allowed_approvals_reviewers = ["user"]
         );
         assert_eq!(
             requirements
-                .permission_profile
-                .can_set(&profile_from_sandbox_policy(
-                    &SandboxPolicy::ExternalSandbox {
-                        network_access: NetworkAccess::Restricted,
-                    }
-                )),
+                .sandbox_policy
+                .can_set(&SandboxPolicy::ExternalSandbox {
+                    network_access: NetworkAccess::Restricted,
+                }),
             Err(ConstraintError::InvalidValue {
                 field_name: "sandbox_mode",
                 candidate: "ExternalSandbox".into(),
@@ -2086,24 +2065,22 @@ allowed_approvals_reviewers = ["user"]
 
         let requirements = ConfigRequirements::try_from(requirements_with_sources)?;
         let root = if cfg!(windows) { "C:\\repo" } else { "/repo" };
-        let workspace_write_policy = SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![AbsolutePathBuf::from_absolute_path(root)?],
-            network_access: false,
-            exclude_tmpdir_env_var: false,
-            exclude_slash_tmp: false,
-        };
         assert!(
             requirements
-                .permission_profile
-                .can_set(&profile_from_sandbox_policy(&workspace_write_policy))
+                .sandbox_policy
+                .can_set(&SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![AbsolutePathBuf::from_absolute_path(root)?],
+                    read_only_access: Default::default(),
+                    network_access: false,
+                    exclude_tmpdir_env_var: false,
+                    exclude_slash_tmp: false,
+                })
                 .is_ok()
         );
         assert_eq!(
             requirements
-                .permission_profile
-                .can_set(&profile_from_sandbox_policy(
-                    &SandboxPolicy::DangerFullAccess,
-                )),
+                .sandbox_policy
+                .can_set(&SandboxPolicy::DangerFullAccess),
             Err(ConstraintError::InvalidValue {
                 field_name: "sandbox_mode",
                 candidate: "DangerFullAccess".into(),
@@ -2133,10 +2110,8 @@ allowed_approvals_reviewers = ["user"]
 
         assert_eq!(
             requirements
-                .permission_profile
-                .can_set(&profile_from_sandbox_policy(
-                    &SandboxPolicy::DangerFullAccess,
-                )),
+                .sandbox_policy
+                .can_set(&SandboxPolicy::DangerFullAccess),
             Err(ConstraintError::InvalidValue {
                 field_name: "sandbox_mode",
                 candidate: "DangerFullAccess".into(),
@@ -2174,10 +2149,8 @@ allowed_approvals_reviewers = ["user"]
 
         assert_eq!(
             requirements
-                .permission_profile
-                .can_set(&profile_from_sandbox_policy(
-                    &SandboxPolicy::new_workspace_write_policy(),
-                )),
+                .sandbox_policy
+                .can_set(&SandboxPolicy::new_workspace_write_policy()),
             Err(ConstraintError::InvalidValue {
                 field_name: "sandbox_mode",
                 candidate: "WorkspaceWrite".into(),

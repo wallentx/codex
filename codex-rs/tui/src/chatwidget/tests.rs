@@ -5,7 +5,6 @@
 //! changes show up as stable, reviewable diffs.
 
 pub(super) use super::*;
-pub(super) use crate::app_command::AppCommand;
 pub(super) use crate::app_event::AppEvent;
 pub(super) use crate::app_event::ExitMode;
 #[cfg(not(target_os = "linux"))]
@@ -66,7 +65,6 @@ pub(super) use codex_app_server_protocol::ItemCompletedNotification;
 pub(super) use codex_app_server_protocol::ItemGuardianApprovalReviewCompletedNotification;
 pub(super) use codex_app_server_protocol::ItemGuardianApprovalReviewStartedNotification;
 pub(super) use codex_app_server_protocol::ItemStartedNotification;
-pub(super) use codex_app_server_protocol::MarketplaceAddResponse;
 pub(super) use codex_app_server_protocol::MarketplaceInterface;
 pub(super) use codex_app_server_protocol::McpServerStartupState;
 pub(super) use codex_app_server_protocol::McpServerStatusDetail;
@@ -171,6 +169,9 @@ pub(super) use codex_protocol::protocol::GuardianRiskLevel;
 pub(super) use codex_protocol::protocol::GuardianUserAuthorization;
 pub(super) use codex_protocol::protocol::ImageGenerationEndEvent;
 pub(super) use codex_protocol::protocol::ItemCompletedEvent;
+pub(super) use codex_protocol::protocol::McpStartupCompleteEvent;
+pub(super) use codex_protocol::protocol::McpStartupStatus;
+pub(super) use codex_protocol::protocol::McpStartupUpdateEvent;
 pub(super) use codex_protocol::protocol::ModelVerification as CoreModelVerification;
 pub(super) use codex_protocol::protocol::ModelVerificationEvent;
 pub(super) use codex_protocol::protocol::NonSteerableTurnKind;
@@ -181,6 +182,7 @@ pub(super) use codex_protocol::protocol::PatchApplyStatus as CorePatchApplyStatu
 pub(super) use codex_protocol::protocol::RateLimitReachedType;
 pub(super) use codex_protocol::protocol::RateLimitSnapshot;
 pub(super) use codex_protocol::protocol::RateLimitWindow;
+pub(super) use codex_protocol::protocol::ReadOnlyAccess;
 pub(super) use codex_protocol::protocol::RealtimeConversationClosedEvent;
 pub(super) use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
 pub(super) use codex_protocol::protocol::RealtimeEvent;
@@ -268,7 +270,6 @@ mod approval_requests;
 mod background_events;
 mod composer_submission;
 mod exec_flow;
-mod goal_menu;
 mod guardian;
 mod helpers;
 mod history_replay;
@@ -282,7 +283,6 @@ mod slash_commands;
 mod status_and_layout;
 mod status_command_tests;
 mod status_surface_previews;
-mod terminal_title;
 
 pub(crate) use helpers::make_chatwidget_manual_with_sender;
 pub(crate) use helpers::set_chatgpt_auth;
