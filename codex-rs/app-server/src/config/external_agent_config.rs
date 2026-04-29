@@ -9,8 +9,6 @@ use codex_core_plugins::marketplace::find_marketplace_manifest_path;
 use codex_core_plugins::marketplace_add::MarketplaceAddRequest;
 use codex_core_plugins::marketplace_add::add_marketplace;
 use codex_core_plugins::marketplace_add::is_local_marketplace_source;
-use codex_external_agent_sessions::ExternalAgentSessionMigration;
-use codex_external_agent_sessions::detect_recent_sessions;
 use codex_protocol::protocol::Product;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -43,7 +41,6 @@ pub(crate) enum ExternalAgentConfigMigrationItemType {
     AgentsMd,
     Plugins,
     McpServerConfig,
-    Sessions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +52,6 @@ pub(crate) struct PluginsMigration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MigrationDetails {
     pub plugins: Vec<PluginsMigration>,
-    pub sessions: Vec<ExternalAgentSessionMigration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,10 +119,6 @@ impl ExternalAgentConfigService {
         Ok(items)
     }
 
-    pub(crate) fn detect_recent_sessions(&self) -> io::Result<Vec<ExternalAgentSessionMigration>> {
-        detect_recent_sessions(&self.external_agent_home, &self.codex_home)
-    }
-
     pub(crate) async fn import(
         &self,
         migration_items: Vec<ExternalAgentConfigMigrationItem>,
@@ -183,7 +175,6 @@ impl ExternalAgentConfigService {
                     );
                 }
                 ExternalAgentConfigMigrationItemType::McpServerConfig => {}
-                ExternalAgentConfigMigrationItemType::Sessions => {}
             }
         }
 
@@ -346,29 +337,6 @@ impl ExternalAgentConfigService {
             }
         }
 
-        if repo_root.is_none() {
-            let sessions = detect_recent_sessions(&self.external_agent_home, &self.codex_home)?;
-            if !sessions.is_empty() {
-                items.push(ExternalAgentConfigMigrationItem {
-                    item_type: ExternalAgentConfigMigrationItemType::Sessions,
-                    description: format!(
-                        "Migrate recent sessions from {}",
-                        self.external_agent_home.join("projects").display()
-                    ),
-                    cwd: None,
-                    details: Some(MigrationDetails {
-                        plugins: Vec::new(),
-                        sessions,
-                    }),
-                });
-                emit_migration_metric(
-                    EXTERNAL_AGENT_CONFIG_DETECT_METRIC,
-                    ExternalAgentConfigMigrationItemType::Sessions,
-                    /*skills_count*/ None,
-                );
-            }
-        }
-
         Ok(())
     }
 
@@ -445,11 +413,9 @@ impl ExternalAgentConfigService {
 
         let local_details = (!local_plugins.is_empty()).then_some(MigrationDetails {
             plugins: local_plugins,
-            sessions: Vec::new(),
         });
         let remote_details = (!remote_plugins.is_empty()).then_some(MigrationDetails {
             plugins: remote_plugins,
-            sessions: Vec::new(),
         });
 
         Ok((local_details, remote_details))
@@ -460,7 +426,7 @@ impl ExternalAgentConfigService {
         cwd: Option<&Path>,
         details: Option<MigrationDetails>,
     ) -> io::Result<PluginImportOutcome> {
-        let Some(MigrationDetails { plugins, .. }) = details else {
+        let Some(MigrationDetails { plugins }) = details else {
             return Err(invalid_data_error(
                 "plugins migration item is missing details".to_string(),
             ));
@@ -728,10 +694,7 @@ fn extract_plugin_migration_details(
         return None;
     }
 
-    Some(MigrationDetails {
-        plugins,
-        sessions: Vec::new(),
-    })
+    Some(MigrationDetails { plugins })
 }
 
 fn collect_enabled_plugins(settings: &JsonValue) -> Vec<String> {
@@ -1193,7 +1156,6 @@ fn migration_metric_tags(
         ExternalAgentConfigMigrationItemType::AgentsMd => "agents_md",
         ExternalAgentConfigMigrationItemType::Plugins => "plugins",
         ExternalAgentConfigMigrationItemType::McpServerConfig => "mcp_server_config",
-        ExternalAgentConfigMigrationItemType::Sessions => "sessions",
     };
     let mut tags = vec![("migration_type", migration_type.to_string())];
     if item_type == ExternalAgentConfigMigrationItemType::Skills {

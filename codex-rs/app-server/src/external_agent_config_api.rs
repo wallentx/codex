@@ -3,8 +3,7 @@ use crate::config::external_agent_config::ExternalAgentConfigMigrationItem as Co
 use crate::config::external_agent_config::ExternalAgentConfigMigrationItemType as CoreMigrationItemType;
 use crate::config::external_agent_config::ExternalAgentConfigService;
 use crate::config::external_agent_config::PendingPluginImport;
-use crate::error_code::internal_error;
-use crate::error_code::invalid_params;
+use crate::error_code::INTERNAL_ERROR_CODE;
 use codex_app_server_protocol::ExternalAgentConfigDetectParams;
 use codex_app_server_protocol::ExternalAgentConfigDetectResponse;
 use codex_app_server_protocol::ExternalAgentConfigImportParams;
@@ -13,25 +12,18 @@ use codex_app_server_protocol::ExternalAgentConfigMigrationItemType;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::MigrationDetails;
 use codex_app_server_protocol::PluginsMigration;
-use codex_external_agent_sessions::ExternalAgentSessionMigration as CoreSessionMigration;
-use codex_external_agent_sessions::PendingSessionImport;
-use codex_external_agent_sessions::PrepareSessionImportsError;
-use codex_external_agent_sessions::prepare_pending_session_imports;
-use codex_external_agent_sessions::record_imported_session;
-use codex_protocol::ThreadId;
+use std::io;
 use std::path::PathBuf;
 
 #[derive(Clone)]
 pub(crate) struct ExternalAgentConfigApi {
-    codex_home: PathBuf,
     migration_service: ExternalAgentConfigService,
 }
 
 impl ExternalAgentConfigApi {
     pub(crate) fn new(codex_home: PathBuf) -> Self {
         Self {
-            migration_service: ExternalAgentConfigService::new(codex_home.clone()),
-            codex_home,
+            migration_service: ExternalAgentConfigService::new(codex_home),
         }
     }
 
@@ -46,7 +38,7 @@ impl ExternalAgentConfigApi {
                 cwds: params.cwds,
             })
             .await
-            .map_err(|err| internal_error(err.to_string()))?;
+            .map_err(map_io_error)?;
 
         Ok(ExternalAgentConfigDetectResponse {
             items: items
@@ -68,9 +60,6 @@ impl ExternalAgentConfigApi {
                         CoreMigrationItemType::McpServerConfig => {
                             ExternalAgentConfigMigrationItemType::McpServerConfig
                         }
-                        CoreMigrationItemType::Sessions => {
-                            ExternalAgentConfigMigrationItemType::Sessions
-                        }
                     },
                     description: migration_item.description,
                     cwd: migration_item.cwd,
@@ -83,77 +72,10 @@ impl ExternalAgentConfigApi {
                                 plugin_names: plugin.plugin_names,
                             })
                             .collect(),
-                        sessions: details
-                            .sessions
-                            .into_iter()
-                            .map(|session| codex_app_server_protocol::SessionMigration {
-                                path: session.path,
-                                cwd: session.cwd,
-                                title: session.title,
-                            })
-                            .collect(),
                     }),
                 })
                 .collect(),
         })
-    }
-
-    pub(crate) fn detect_recent_sessions(
-        &self,
-    ) -> Result<Vec<CoreSessionMigration>, JSONRPCErrorError> {
-        self.migration_service
-            .detect_recent_sessions()
-            .map_err(|err| internal_error(err.to_string()))
-    }
-
-    pub(crate) fn prepare_pending_session_imports(
-        &self,
-        params: &ExternalAgentConfigImportParams,
-    ) -> Result<Vec<PendingSessionImport>, JSONRPCErrorError> {
-        let sessions = params
-            .migration_items
-            .iter()
-            .filter(|item| {
-                matches!(
-                    item.item_type,
-                    ExternalAgentConfigMigrationItemType::Sessions
-                )
-            })
-            .filter_map(|item| item.details.as_ref())
-            .flat_map(|details| details.sessions.clone())
-            .map(|session| CoreSessionMigration {
-                path: session.path,
-                cwd: session.cwd,
-                title: session.title,
-            })
-            .collect::<Vec<_>>();
-        let detected_sessions = if sessions.is_empty() {
-            Vec::new()
-        } else {
-            self.detect_recent_sessions()?
-        };
-        prepare_pending_session_imports(&self.codex_home, sessions, detected_sessions).map_err(
-            |err| match err {
-                PrepareSessionImportsError::SessionNotDetected(_) => {
-                    invalid_params(err.to_string())
-                }
-            },
-        )
-    }
-
-    pub(crate) fn record_imported_session(
-        &self,
-        source_path: &std::path::Path,
-        imported_thread_id: ThreadId,
-    ) {
-        if let Err(err) = record_imported_session(&self.codex_home, source_path, imported_thread_id)
-        {
-            tracing::warn!(
-                error = %err,
-                path = %source_path.display(),
-                "external agent session import ledger update failed"
-            );
-        }
     }
 
     pub(crate) async fn import(
@@ -182,9 +104,6 @@ impl ExternalAgentConfigApi {
                             ExternalAgentConfigMigrationItemType::McpServerConfig => {
                                 CoreMigrationItemType::McpServerConfig
                             }
-                            ExternalAgentConfigMigrationItemType::Sessions => {
-                                CoreMigrationItemType::Sessions
-                            }
                         },
                         description: migration_item.description,
                         cwd: migration_item.cwd,
@@ -200,22 +119,13 @@ impl ExternalAgentConfigApi {
                                         }
                                     })
                                     .collect(),
-                                sessions: details
-                                    .sessions
-                                    .into_iter()
-                                    .map(|session| CoreSessionMigration {
-                                        path: session.path,
-                                        cwd: session.cwd,
-                                        title: session.title,
-                                    })
-                                    .collect(),
                             }
                         }),
                     })
                     .collect(),
             )
             .await
-            .map_err(|err| internal_error(err.to_string()))
+            .map_err(map_io_error)
     }
 
     pub(crate) async fn complete_pending_plugin_import(
@@ -229,6 +139,14 @@ impl ExternalAgentConfigApi {
             )
             .await
             .map(|_| ())
-            .map_err(|err| internal_error(err.to_string()))
+            .map_err(map_io_error)
+    }
+}
+
+fn map_io_error(err: io::Error) -> JSONRPCErrorError {
+    JSONRPCErrorError {
+        code: INTERNAL_ERROR_CODE,
+        message: err.to_string(),
+        data: None,
     }
 }

@@ -6,7 +6,6 @@ pub mod marketplace_add;
 pub mod marketplace_remove;
 pub mod marketplace_upgrade;
 pub mod remote;
-pub mod remote_bundle;
 pub mod remote_legacy;
 pub mod startup_sync;
 pub mod store;

@@ -1,5 +1,4 @@
 use codex_config::ConfigLayerStack;
-use codex_plugin::PluginHookSource;
 use tokio::process::Command;
 
 use crate::engine::ClaudeHooksEngine;
@@ -26,8 +25,6 @@ pub struct HooksConfig {
     pub legacy_notify_argv: Option<Vec<String>>,
     pub feature_enabled: bool,
     pub config_layer_stack: Option<ConfigLayerStack>,
-    pub plugin_hook_sources: Vec<PluginHookSource>,
-    pub plugin_hook_load_warnings: Vec<String>,
     pub shell_program: Option<String>,
     pub shell_args: Vec<String>,
 }
@@ -56,8 +53,6 @@ impl Hooks {
         let engine = ClaudeHooksEngine::new(
             config.feature_enabled,
             config.config_layer_stack.as_ref(),
-            config.plugin_hook_sources,
-            config.plugin_hook_load_warnings,
             CommandShell {
                 program: config.shell_program.unwrap_or_default(),
                 args: config.shell_args,

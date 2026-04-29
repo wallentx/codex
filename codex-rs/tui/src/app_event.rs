@@ -13,7 +13,6 @@ use std::path::PathBuf;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::AppInfo;
-use codex_app_server_protocol::MarketplaceAddResponse;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::PluginInstallResponse;
@@ -22,7 +21,6 @@ use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
 use codex_app_server_protocol::SkillsListResponse;
-use codex_app_server_protocol::ThreadGoalStatus;
 use codex_file_search::FileMatch;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelPreset;
@@ -42,9 +40,9 @@ use codex_plugin::PluginCapabilitySummary;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ServiceTier;
-use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::SandboxPolicy;
 use codex_realtime_webrtc::RealtimeWebrtcEvent;
 use codex_realtime_webrtc::RealtimeWebrtcSessionHandle;
 
@@ -54,12 +52,6 @@ use crate::history_cell::HistoryCell;
 pub(crate) enum RealtimeAudioDeviceKind {
     Microphone,
     Speaker,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ThreadGoalSetMode {
-    ConfirmIfExists,
-    ReplaceExisting,
 }
 
 impl RealtimeAudioDeviceKind {
@@ -106,13 +98,6 @@ pub(crate) enum RateLimitRefreshOrigin {
     /// User-initiated via `/status`; the `request_id` correlates with the
     /// status card that should be updated when the fetch completes.
     StatusCommand { request_id: u64 },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum KeymapEditIntent {
-    ReplaceAll,
-    AddAlternate,
-    ReplaceOne { old_key: String },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -184,12 +169,6 @@ pub(crate) enum AppEvent {
     /// bubbling channels through layers of widgets.
     CodexOp(Op),
 
-    /// Approve one retry of a recent auto-review denial selected in the TUI.
-    ApproveRecentAutoReviewDenial {
-        thread_id: ThreadId,
-        id: String,
-    },
-
     /// Kick off an asynchronous file search for the given query (text after
     /// the `@`). Previous searches may be cancelled by the app layer so there
     /// is at most one in-flight search.
@@ -206,29 +185,6 @@ pub(crate) enum AppEvent {
     /// Refresh account rate limits in the background.
     RefreshRateLimits {
         origin: RateLimitRefreshOrigin,
-    },
-
-    /// Open the current thread goal summary/action menu.
-    OpenThreadGoalMenu {
-        thread_id: ThreadId,
-    },
-
-    /// Set or replace the current thread goal objective.
-    SetThreadGoalObjective {
-        thread_id: ThreadId,
-        objective: String,
-        mode: ThreadGoalSetMode,
-    },
-
-    /// Pause or unpause the current thread goal.
-    SetThreadGoalStatus {
-        thread_id: ThreadId,
-        status: ThreadGoalStatus,
-    },
-
-    /// Clear the current thread goal.
-    ClearThreadGoal {
-        thread_id: ThreadId,
     },
 
     /// Result of refreshing rate limits.
@@ -286,27 +242,6 @@ pub(crate) enum AppEvent {
     PluginsLoaded {
         cwd: PathBuf,
         result: Result<PluginListResponse, String>,
-    },
-
-    /// Open the prompt for adding a marketplace source.
-    OpenMarketplaceAddPrompt,
-
-    /// Replace the plugins popup with a marketplace-add loading state.
-    OpenMarketplaceAddLoading {
-        source: String,
-    },
-
-    /// Add a marketplace from the provided source.
-    FetchMarketplaceAdd {
-        cwd: PathBuf,
-        source: String,
-    },
-
-    /// Result of adding a marketplace.
-    MarketplaceAddLoaded {
-        cwd: PathBuf,
-        source: String,
-        result: Result<MarketplaceAddResponse, String>,
     },
 
     /// Replace the plugins popup with a plugin-detail loading state.
@@ -603,8 +538,8 @@ pub(crate) enum AppEvent {
     /// Update the current approval policy in the running app and widget.
     UpdateAskForApprovalPolicy(AskForApproval),
 
-    /// Update the current permission profile in the running app and widget.
-    UpdatePermissionProfile(PermissionProfile),
+    /// Update the current sandbox policy in the running app and widget.
+    UpdateSandboxPolicy(SandboxPolicy),
 
     /// Update the current approvals reviewer in the running app and widget.
     UpdateApprovalsReviewer(ApprovalsReviewer),
@@ -768,39 +703,6 @@ pub(crate) enum AppEvent {
     /// Apply a user-confirmed syntax theme selection.
     SyntaxThemeSelected {
         name: String,
-    },
-
-    /// Open set/remove actions for the selected keymap action.
-    OpenKeymapActionMenu {
-        context: String,
-        action: String,
-    },
-
-    /// Open binding selection before replacing one binding for an action.
-    OpenKeymapReplaceBindingMenu {
-        context: String,
-        action: String,
-    },
-
-    /// Open key capture for the selected keymap action.
-    OpenKeymapCapture {
-        context: String,
-        action: String,
-        intent: KeymapEditIntent,
-    },
-
-    /// Apply a captured key to the selected keymap action.
-    KeymapCaptured {
-        context: String,
-        action: String,
-        key: String,
-        intent: KeymapEditIntent,
-    },
-
-    /// Remove the custom root binding for the selected keymap action.
-    KeymapCleared {
-        context: String,
-        action: String,
     },
 }
 
