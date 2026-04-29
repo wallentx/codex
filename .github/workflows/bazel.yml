@@ -17,13 +17,6 @@ concurrency:
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 jobs:
   test:
-    # Even though a no-cache-hit Windows build seems to exceed the 30-minute
-    # limit on occasion, the more common reason for exceeding the limit is a
-    # true test failure in a rust_test() marked "flaky" that gets run 3x.
-    # In that case, extra time generally does not give us more signal.
-    #
-    # Ultimately we need true distributed builds (e.g.,
-    # https://www.buildbuddy.io/docs/rbe-setup/) to speed things up.
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -70,7 +63,6 @@ jobs:
         uses: ./.github/actions/prepare-bazel-ci
         with:
           target: ${{ matrix.target }}
-          cache-scope: bazel-${{ github.job }}
           install-test-prereqs: "true"
       - name: Check MODULE.bazel.lock is up to date
         if: matrix.os == 'ubuntu-24.04' && matrix.target == 'x86_64-unknown-linux-gnu'
@@ -92,6 +84,7 @@ jobs:
 
           bazel_wrapper_args=(
             --print-failed-test-logs
+            --use-node-test-env
           )
           bazel_test_args=(
             test
@@ -120,15 +113,15 @@ jobs:
           path: ${{ runner.temp }}/bazel-execution-logs
           if-no-files-found: ignore
 
-      # Save the job-scoped Bazel repository cache after cache misses. Keep the
+      # Save the Bazel repository cache after every non-cancelled run. Keep the
       # upload non-fatal so cache service issues never fail the job itself.
       - name: Save bazel repository cache
-        if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+        if: always() && !cancelled()
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
         with:
           path: ${{ steps.prepare_bazel.outputs.repository-cache-path }}
-          key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
+          key: bazel-cache-${{ matrix.target }}-${{ hashFiles('MODULE.bazel', 'codex-rs/Cargo.lock', 'codex-rs/Cargo.toml') }}
 
   clippy:
     timeout-minutes: 30
@@ -157,7 +150,6 @@ jobs:
         uses: ./.github/actions/prepare-bazel-ci
         with:
           target: ${{ matrix.target }}
-          cache-scope: bazel-${{ github.job }}
 
       - name: bazel build --config=clippy lint targets
         env:
@@ -169,14 +161,10 @@ jobs:
             --build_metadata=COMMIT_SHA=${GITHUB_SHA}
             --build_metadata=TAG_job=clippy
           )
-          bazel_wrapper_args=()
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            # Keep this aligned with the Windows Bazel test job. With the
-            # default `//:local_windows` host platform, Windows `rust_test`
-            # targets such as `//codex-rs/core:core-all-test` can be skipped
-            # by `--skip_incompatible_explicit_targets`, which hides clippy
-            # diagnostics from integration-test modules.
-            bazel_wrapper_args+=(--windows-msvc-host-platform)
+            # Some explicit targets pulled in through //codex-rs/... are
+            # intentionally incompatible with `//:local_windows`, but the lint
+            # aspect still traverses their compatible Rust deps.
             bazel_clippy_args+=(--skip_incompatible_explicit_targets)
           fi
 
@@ -187,8 +175,6 @@ jobs:
           done <<< "${bazel_target_lines}"
 
           ./.github/scripts/run-bazel-ci.sh \
-            --print-failed-action-summary \
-            "${bazel_wrapper_args[@]}" \
             -- \
             build \
             "${bazel_clippy_args[@]}" \
@@ -204,15 +190,15 @@ jobs:
           path: ${{ runner.temp }}/bazel-execution-logs
           if-no-files-found: ignore
 
-      # Save the job-scoped Bazel repository cache after cache misses. Keep the
+      # Save the Bazel repository cache after every non-cancelled run. Keep the
       # upload non-fatal so cache service issues never fail the job itself.
       - name: Save bazel repository cache
-        if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+        if: always() && !cancelled()
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
         with:
           path: ${{ steps.prepare_bazel.outputs.repository-cache-path }}
-          key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
+          key: bazel-cache-${{ matrix.target }}-${{ hashFiles('MODULE.bazel', 'codex-rs/Cargo.lock', 'codex-rs/Cargo.toml') }}
 
   verify-release-build:
     timeout-minutes: 30
@@ -237,7 +223,6 @@ jobs:
         uses: ./.github/actions/prepare-bazel-ci
         with:
           target: ${{ matrix.target }}
-          cache-scope: bazel-${{ github.job }}
 
       - name: bazel build verify-release-build targets
         env:
@@ -287,12 +272,12 @@ jobs:
           path: ${{ runner.temp }}/bazel-execution-logs
           if-no-files-found: ignore
 
-      # Save the job-scoped Bazel repository cache after cache misses. Keep the
+      # Save the Bazel repository cache after every non-cancelled run. Keep the
       # upload non-fatal so cache service issues never fail the job itself.
       - name: Save bazel repository cache
-        if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+        if: always() && !cancelled()
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
         with:
           path: ${{ steps.prepare_bazel.outputs.repository-cache-path }}
-          key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
+          key: bazel-cache-${{ matrix.target }}-${{ hashFiles('MODULE.bazel', 'codex-rs/Cargo.lock', 'codex-rs/Cargo.toml') }}

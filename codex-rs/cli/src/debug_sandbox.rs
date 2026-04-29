@@ -16,8 +16,7 @@ use codex_core::spawn::CODEX_SANDBOX_ENV_VAR;
 use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::permissions::NetworkSandboxPolicy;
-use codex_sandboxing::landlock::allow_network_for_proxy;
-use codex_sandboxing::landlock::create_linux_sandbox_command_args_for_permission_profile;
+use codex_sandboxing::landlock::create_linux_sandbox_command_args_for_policies;
 #[cfg(target_os = "macos")]
 use codex_sandboxing::seatbelt::CreateSeatbeltCommandArgsParams;
 #[cfg(target_os = "macos")]
@@ -172,7 +171,7 @@ async fn run_command_under_sandbox(
     let network_proxy = match config.permissions.network.as_ref() {
         Some(spec) => Some(
             spec.start_proxy(
-                config.permissions.permission_profile.get(),
+                config.permissions.sandbox_policy.get(),
                 /*policy_decider*/ None,
                 /*blocked_request_observer*/ None,
                 managed_network_requirements_enabled,
@@ -190,23 +189,22 @@ async fn run_command_under_sandbox(
     let mut child = match sandbox_type {
         #[cfg(target_os = "macos")]
         SandboxType::Seatbelt => {
-            let file_system_sandbox_policy = config.permissions.file_system_sandbox_policy();
-            let network_sandbox_policy = config.permissions.network_sandbox_policy();
             let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
                 command,
-                file_system_sandbox_policy: &file_system_sandbox_policy,
-                network_sandbox_policy,
+                file_system_sandbox_policy: &config.permissions.file_system_sandbox_policy,
+                network_sandbox_policy: config.permissions.network_sandbox_policy,
                 sandbox_policy_cwd: sandbox_policy_cwd.as_path(),
                 enforce_managed_network: false,
                 network: network.as_ref(),
                 extra_allow_unix_sockets: allow_unix_sockets,
             });
+            let network_policy = config.permissions.network_sandbox_policy;
             spawn_debug_sandbox_child(
                 PathBuf::from("/usr/bin/sandbox-exec"),
                 args,
                 /*arg0*/ None,
                 cwd.to_path_buf(),
-                network_sandbox_policy,
+                network_policy,
                 env,
                 |env_map| {
                     env_map.insert(CODEX_SANDBOX_ENV_VAR.to_string(), "seatbelt".to_string());
@@ -223,21 +221,23 @@ async fn run_command_under_sandbox(
                 .codex_linux_sandbox_exe
                 .expect("codex-linux-sandbox executable not found");
             let use_legacy_landlock = config.features.use_legacy_landlock();
-            let network_sandbox_policy = config.permissions.network_sandbox_policy();
-            let args = create_linux_sandbox_command_args_for_permission_profile(
+            let args = create_linux_sandbox_command_args_for_policies(
                 command,
                 cwd.as_path(),
-                &config.permissions.permission_profile(),
+                config.permissions.sandbox_policy.get(),
+                &config.permissions.file_system_sandbox_policy,
+                config.permissions.network_sandbox_policy,
                 sandbox_policy_cwd.as_path(),
                 use_legacy_landlock,
-                allow_network_for_proxy(managed_network_requirements_enabled),
+                /*allow_network_for_proxy*/ false,
             );
+            let network_policy = config.permissions.network_sandbox_policy;
             spawn_debug_sandbox_child(
                 codex_linux_sandbox_exe,
                 args,
                 Some("codex-linux-sandbox"),
                 cwd.to_path_buf(),
-                network_sandbox_policy,
+                network_policy,
                 env,
                 |env_map| {
                     if let Some(network) = network.as_ref() {
@@ -288,10 +288,7 @@ async fn run_command_under_windows_session(
     use codex_windows_sandbox::spawn_windows_sandbox_session_elevated;
     use codex_windows_sandbox::spawn_windows_sandbox_session_legacy;
 
-    let sandbox_policy = config
-        .permissions
-        .legacy_sandbox_policy(sandbox_policy_cwd.as_path());
-    let policy_str = match serde_json::to_string(&sandbox_policy) {
+    let policy_str = match serde_json::to_string(config.permissions.sandbox_policy.get()) {
         Ok(policy_str) => policy_str,
         Err(err) => {
             eprintln!("windows sandbox failed to serialize policy: {err}");
@@ -718,17 +715,17 @@ mod tests {
 
         assert!(config_uses_permission_profiles(&config));
         assert!(
-            profile_config.permissions.file_system_sandbox_policy()
-                != legacy_config.permissions.file_system_sandbox_policy(),
+            profile_config.permissions.file_system_sandbox_policy
+                != legacy_config.permissions.file_system_sandbox_policy,
             "test fixture should distinguish profile syntax from legacy sandbox_mode"
         );
         assert_eq!(
-            config.permissions.file_system_sandbox_policy(),
-            profile_config.permissions.file_system_sandbox_policy(),
+            config.permissions.file_system_sandbox_policy,
+            profile_config.permissions.file_system_sandbox_policy,
         );
         assert_ne!(
-            config.permissions.file_system_sandbox_policy(),
-            legacy_config.permissions.file_system_sandbox_policy(),
+            config.permissions.file_system_sandbox_policy,
+            legacy_config.permissions.file_system_sandbox_policy,
         );
 
         Ok(())
