@@ -3,12 +3,10 @@ use codex_features::Feature;
 use codex_features::Features;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WindowsSandboxLevel;
-use codex_protocol::models::ManagedFileSystemPermissions;
-use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -52,40 +50,25 @@ fn model_info() -> ModelInfo {
 }
 
 #[test]
-fn unified_exec_is_blocked_for_windows_managed_profiles_only() {
+fn unified_exec_is_blocked_for_windows_sandboxed_policies_only() {
     assert!(!unified_exec_allowed_in_environment(
         /*is_windows*/ true,
-        &PermissionProfile::read_only(),
+        &SandboxPolicy::new_read_only_policy(),
         WindowsSandboxLevel::RestrictedToken,
     ));
     assert!(!unified_exec_allowed_in_environment(
         /*is_windows*/ true,
-        &PermissionProfile::workspace_write(),
+        &SandboxPolicy::new_workspace_write_policy(),
         WindowsSandboxLevel::RestrictedToken,
     ));
     assert!(unified_exec_allowed_in_environment(
         /*is_windows*/ true,
-        &PermissionProfile::Disabled,
+        &SandboxPolicy::DangerFullAccess,
         WindowsSandboxLevel::RestrictedToken,
     ));
     assert!(unified_exec_allowed_in_environment(
         /*is_windows*/ true,
-        &PermissionProfile::External {
-            network: Default::default(),
-        },
-        WindowsSandboxLevel::RestrictedToken,
-    ));
-    assert!(unified_exec_allowed_in_environment(
-        /*is_windows*/ true,
-        &PermissionProfile::Managed {
-            file_system: ManagedFileSystemPermissions::Unrestricted,
-            network: NetworkSandboxPolicy::Enabled,
-        },
-        WindowsSandboxLevel::RestrictedToken,
-    ));
-    assert!(unified_exec_allowed_in_environment(
-        /*is_windows*/ true,
-        &PermissionProfile::Disabled,
+        &SandboxPolicy::DangerFullAccess,
         WindowsSandboxLevel::Disabled,
     ));
 }
@@ -105,7 +88,7 @@ fn shell_zsh_fork_prefers_shell_command_over_unified_exec() {
         image_generation_tool_auth_allowed: true,
         web_search_mode: Some(WebSearchMode::Live),
         session_source: SessionSource::Cli,
-        permission_profile: &PermissionProfile::Disabled,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     });
 
@@ -165,7 +148,7 @@ fn subagents_keep_request_user_input_mode_config_and_agent_jobs_workers_opt_in_b
         session_source: SessionSource::SubAgent(SubAgentSource::Other(
             "agent_job:test".to_string(),
         )),
-        permission_profile: &PermissionProfile::Disabled,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     });
 
@@ -193,7 +176,7 @@ fn image_generation_requires_feature_and_supported_model() {
         image_generation_tool_auth_allowed: true,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
-        permission_profile: &PermissionProfile::Disabled,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     });
     let supported_tools_config = ToolsConfig::new(&ToolsConfigParams {
@@ -203,7 +186,7 @@ fn image_generation_requires_feature_and_supported_model() {
         image_generation_tool_auth_allowed: true,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
-        permission_profile: &PermissionProfile::Disabled,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     });
     let auth_disallowed_tools_config = ToolsConfig::new(&ToolsConfigParams {
@@ -213,7 +196,7 @@ fn image_generation_requires_feature_and_supported_model() {
         image_generation_tool_auth_allowed: false,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
-        permission_profile: &PermissionProfile::Disabled,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     });
     let unsupported_tools_config = ToolsConfig::new(&ToolsConfigParams {
@@ -223,7 +206,7 @@ fn image_generation_requires_feature_and_supported_model() {
         image_generation_tool_auth_allowed: true,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
-        permission_profile: &PermissionProfile::Disabled,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     });
     assert!(!default_tools_config.image_gen_tool);

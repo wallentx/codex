@@ -269,10 +269,13 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
     config.cwd = turn.cwd.clone();
     config
         .permissions
-        .set_permission_profile(turn.permission_profile())
+        .sandbox_policy
+        .set(turn.sandbox_policy.get().clone())
         .map_err(|err| {
-            FunctionCallError::RespondToModel(format!("permission_profile is invalid: {err}"))
+            FunctionCallError::RespondToModel(format!("sandbox_policy is invalid: {err}"))
         })?;
+    config.permissions.file_system_sandbox_policy = turn.file_system_sandbox_policy.clone();
+    config.permissions.network_sandbox_policy = turn.network_sandbox_policy;
     Ok(())
 }
 

@@ -24,7 +24,6 @@ pub(super) async fn spawn_review_thread(
     let _ = review_features.disable(Feature::WebSearchRequest);
     let _ = review_features.disable(Feature::WebSearchCached);
     let review_web_search_mode = WebSearchMode::Disabled;
-    let goal_tools_supported = !config.ephemeral && parent_turn_context.tools_config.goal_tools;
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &review_model_info,
         available_models: &sess
@@ -38,7 +37,7 @@ pub(super) async fn spawn_review_thread(
         )),
         web_search_mode: Some(review_web_search_mode),
         session_source: parent_turn_context.session_source.clone(),
-        permission_profile: &parent_turn_context.permission_profile,
+        sandbox_policy: parent_turn_context.sandbox_policy.get(),
         windows_sandbox_level: parent_turn_context.windows_sandbox_level,
     })
     .with_unified_exec_shell_mode_for_session(
@@ -52,8 +51,6 @@ pub(super) async fn spawn_review_thread(
     .with_spawn_agent_usage_hint(config.multi_agent_v2.usage_hint_enabled)
     .with_spawn_agent_usage_hint_text(config.multi_agent_v2.usage_hint_text.clone())
     .with_hide_spawn_agent_metadata(config.multi_agent_v2.hide_spawn_agent_metadata)
-    .with_goal_tools_allowed(goal_tools_supported)
-    .with_max_concurrent_threads_per_session(config.agent_max_threads)
     .with_agent_type_description(crate::agent::role::spawn_tool_spec::build(
         &config.agent_roles,
     ));
@@ -97,9 +94,8 @@ pub(super) async fn spawn_review_thread(
         &session_source,
         review_turn_id.clone(),
         parent_turn_context.cwd.clone(),
-        &parent_turn_context.permission_profile,
+        parent_turn_context.sandbox_policy.get(),
         parent_turn_context.windows_sandbox_level,
-        parent_turn_context.network.is_some(),
     ));
 
     let review_turn_context = TurnContext {
@@ -128,7 +124,9 @@ pub(super) async fn spawn_review_thread(
         collaboration_mode: parent_turn_context.collaboration_mode.clone(),
         personality: parent_turn_context.personality,
         approval_policy: parent_turn_context.approval_policy.clone(),
-        permission_profile: parent_turn_context.permission_profile(),
+        sandbox_policy: parent_turn_context.sandbox_policy.clone(),
+        file_system_sandbox_policy: parent_turn_context.file_system_sandbox_policy.clone(),
+        network_sandbox_policy: parent_turn_context.network_sandbox_policy,
         network: parent_turn_context.network.clone(),
         windows_sandbox_level: parent_turn_context.windows_sandbox_level,
         shell_environment_policy: parent_turn_context.shell_environment_policy.clone(),
@@ -137,6 +135,7 @@ pub(super) async fn spawn_review_thread(
         codex_self_exe: parent_turn_context.codex_self_exe.clone(),
         codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
         tool_call_gate: Arc::new(ReadinessFlag::new()),
+        js_repl: Arc::clone(&sess.js_repl),
         dynamic_tools: parent_turn_context.dynamic_tools.clone(),
         truncation_policy: model_info.truncation_policy.into(),
         turn_metadata_state,
