@@ -203,6 +203,18 @@ pub enum ShellModelOutput {
     // UnifiedExec has its own set of tests
 }
 
+/// Returns the permission fields required by `Op::UserTurn` for tests that
+/// construct the op directly.
+pub fn turn_permission_fields(
+    permission_profile: PermissionProfile,
+    cwd: &Path,
+) -> (SandboxPolicy, Option<PermissionProfile>) {
+    let sandbox_policy = permission_profile
+        .to_legacy_sandbox_policy(cwd)
+        .unwrap_or_else(|_| SandboxPolicy::new_read_only_policy());
+    (sandbox_policy, Some(permission_profile))
+}
+
 pub struct TestCodexBuilder {
     config_mutators: Vec<Box<ConfigMutator>>,
     auth: CodexAuth,
@@ -372,15 +384,17 @@ impl TestCodexBuilder {
             .exec_server_url
             .clone()
             .or_else(|| test_env.exec_server_url().map(str::to_owned));
-        let environment_manager = Arc::new(codex_exec_server::EnvironmentManager::new(
-            codex_exec_server::EnvironmentManagerArgs {
+        let local_runtime_paths = codex_exec_server::ExecServerRuntimePaths::new(
+            std::env::current_exe()?,
+            /*codex_linux_sandbox_exe*/ None,
+        )?;
+        let environment_manager = Arc::new(
+            codex_exec_server::EnvironmentManager::create_for_tests(
                 exec_server_url,
-                local_runtime_paths: codex_exec_server::ExecServerRuntimePaths::new(
-                    std::env::current_exe()?,
-                    /*codex_linux_sandbox_exe*/ None,
-                )?,
-            },
-        ));
+                local_runtime_paths,
+            )
+            .await,
+        );
         let file_system = test_env.environment().get_filesystem();
         let mut workspace_setups = vec![];
         swap(&mut self.workspace_setups, &mut workspace_setups);
@@ -710,9 +724,8 @@ impl TestCodex {
         service_tier: Option<Option<ServiceTier>>,
         environments: Option<Vec<TurnEnvironmentSelection>>,
     ) -> Result<()> {
-        let sandbox_policy = permission_profile
-            .to_legacy_sandbox_policy(self.config.cwd.as_path())
-            .unwrap_or_else(|_| SandboxPolicy::new_read_only_policy());
+        let (sandbox_policy, permission_profile) =
+            turn_permission_fields(permission_profile, self.config.cwd.as_path());
         let session_model = self.session_configured.model.clone();
         self.codex
             .submit(Op::UserTurn {
@@ -726,7 +739,7 @@ impl TestCodex {
                 approval_policy,
                 approvals_reviewer: None,
                 sandbox_policy,
-                permission_profile: Some(permission_profile),
+                permission_profile,
                 model: session_model,
                 effort: None,
                 summary: None,

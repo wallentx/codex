@@ -373,7 +373,7 @@ print(json.dumps({
                 matcher: Some("Bash".to_string()),
                 hooks: vec![HookHandlerConfig::Command {
                     command: format!("python3 {}", script_path.display()),
-                    timeout_sec: Some(5),
+                    timeout_sec: Some(10),
                     r#async: false,
                     status_message: None,
                 }],

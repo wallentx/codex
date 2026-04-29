@@ -19,6 +19,28 @@ use crate::auth::auth_manager_for_provider;
 use crate::auth::resolve_provider_auth;
 use crate::models_endpoint::OpenAiModelsEndpoint;
 
+/// Optional provider-backed features that Codex may expose at runtime.
+///
+/// These capabilities are a provider-owned upper bound. Callers can disable
+/// more functionality through normal config, but should not expose a feature
+/// that the active provider marks unsupported here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderCapabilities {
+    pub namespace_tools: bool,
+    pub image_generation: bool,
+    pub web_search: bool,
+}
+
+impl Default for ProviderCapabilities {
+    fn default() -> Self {
+        Self {
+            namespace_tools: true,
+            image_generation: true,
+            web_search: true,
+        }
+    }
+}
+
 /// Current app-visible account state for a model provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderAccountState {
@@ -58,6 +80,11 @@ pub type ProviderAccountResult = std::result::Result<ProviderAccountState, Provi
 pub trait ModelProvider: fmt::Debug + Send + Sync {
     /// Returns the configured provider metadata.
     fn info(&self) -> &ModelProviderInfo;
+
+    /// Returns the provider-owned capability upper bounds.
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
 
     /// Returns the provider-scoped auth manager, when this provider uses one.
     ///
@@ -302,6 +329,16 @@ mod tests {
     }
 
     #[test]
+    fn configured_provider_uses_default_capabilities() {
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            /*auth_manager*/ None,
+        );
+
+        assert_eq!(provider.capabilities(), ProviderCapabilities::default());
+    }
+
+    #[test]
     fn create_model_provider_builds_command_auth_manager_without_base_manager() {
         let provider = create_model_provider(
             provider_info_with_command_auth(),
@@ -424,7 +461,7 @@ mod tests {
         assert_eq!(
             model_ids,
             vec![
-                "openai.gpt-5.4-cmb",
+                "openai.gpt-5.4",
                 "openai.gpt-oss-120b",
                 "openai.gpt-oss-20b"
             ]
@@ -437,7 +474,7 @@ mod tests {
             .find(|preset| preset.is_default)
             .expect("Bedrock catalog should have a default model");
 
-        assert_eq!(default_model.model, "openai.gpt-5.4-cmb");
+        assert_eq!(default_model.model, "openai.gpt-5.4");
     }
 
     #[tokio::test]

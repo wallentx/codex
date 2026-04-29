@@ -16,7 +16,8 @@ use codex_core::spawn::CODEX_SANDBOX_ENV_VAR;
 use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::permissions::NetworkSandboxPolicy;
-use codex_sandboxing::landlock::create_linux_sandbox_command_args_for_policies;
+use codex_sandboxing::landlock::allow_network_for_proxy;
+use codex_sandboxing::landlock::create_linux_sandbox_command_args_for_permission_profile;
 #[cfg(target_os = "macos")]
 use codex_sandboxing::seatbelt::CreateSeatbeltCommandArgsParams;
 #[cfg(target_os = "macos")]
@@ -222,19 +223,14 @@ async fn run_command_under_sandbox(
                 .codex_linux_sandbox_exe
                 .expect("codex-linux-sandbox executable not found");
             let use_legacy_landlock = config.features.use_legacy_landlock();
-            let file_system_sandbox_policy = config.permissions.file_system_sandbox_policy();
             let network_sandbox_policy = config.permissions.network_sandbox_policy();
-            let args = create_linux_sandbox_command_args_for_policies(
+            let args = create_linux_sandbox_command_args_for_permission_profile(
                 command,
                 cwd.as_path(),
-                &config
-                    .permissions
-                    .legacy_sandbox_policy(sandbox_policy_cwd.as_path()),
-                &file_system_sandbox_policy,
-                network_sandbox_policy,
+                &config.permissions.permission_profile(),
                 sandbox_policy_cwd.as_path(),
                 use_legacy_landlock,
-                /*allow_network_for_proxy*/ false,
+                allow_network_for_proxy(managed_network_requirements_enabled),
             );
             spawn_debug_sandbox_child(
                 codex_linux_sandbox_exe,
