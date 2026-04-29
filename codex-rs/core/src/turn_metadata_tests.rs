@@ -1,8 +1,5 @@
 use super::*;
 
-use crate::sandbox_tags::sandbox_tag;
-use codex_protocol::models::PermissionProfile;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use core_test_support::PathBufExt;
@@ -73,16 +70,14 @@ fn turn_metadata_state_uses_platform_sandbox_tag() {
     let temp_dir = TempDir::new().expect("temp dir");
     let cwd = temp_dir.path().abs();
     let sandbox_policy = SandboxPolicy::new_read_only_policy();
-    let permission_profile = PermissionProfile::read_only();
 
     let state = TurnMetadataState::new(
         "session-a".to_string(),
         &SessionSource::Exec,
         "turn-a".to_string(),
         cwd,
-        &permission_profile,
+        &sandbox_policy,
         WindowsSandboxLevel::Disabled,
-        /*enforce_managed_network*/ false,
     );
 
     let header = state.current_header_value().expect("header");
@@ -102,7 +97,7 @@ fn turn_metadata_state_uses_platform_sandbox_tag() {
 fn turn_metadata_state_classifies_subagent_thread_source() {
     let temp_dir = TempDir::new().expect("temp dir");
     let cwd = temp_dir.path().abs();
-    let permission_profile = PermissionProfile::read_only();
+    let sandbox_policy = SandboxPolicy::new_read_only_policy();
     let session_source = SessionSource::SubAgent(SubAgentSource::Review);
 
     let state = TurnMetadataState::new(
@@ -110,9 +105,8 @@ fn turn_metadata_state_classifies_subagent_thread_source() {
         &session_source,
         "turn-a".to_string(),
         cwd,
-        &permission_profile,
+        &sandbox_policy,
         WindowsSandboxLevel::Disabled,
-        /*enforce_managed_network*/ false,
     );
 
     let header = state.current_header_value().expect("header");
@@ -123,82 +117,24 @@ fn turn_metadata_state_classifies_subagent_thread_source() {
 }
 
 #[test]
-fn turn_metadata_state_includes_turn_started_at_unix_ms_after_start() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let cwd = temp_dir.path().abs();
-    let permission_profile = PermissionProfile::read_only();
-
-    let state = TurnMetadataState::new(
-        "session-a".to_string(),
-        &SessionSource::Exec,
-        "turn-a".to_string(),
-        cwd,
-        &permission_profile,
-        WindowsSandboxLevel::Disabled,
-        /*enforce_managed_network*/ false,
-    );
-    state.set_turn_started_at_unix_ms(/*turn_started_at_unix_ms*/ 1_700_000_000_123);
-
-    let header = state.current_header_value().expect("header");
-    let json: Value = serde_json::from_str(&header).expect("json");
-
-    assert_eq!(
-        json["turn_started_at_unix_ms"].as_i64(),
-        Some(1_700_000_000_123)
-    );
-}
-
-#[test]
-fn turn_metadata_state_ignores_client_turn_started_at_unix_ms_before_start() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let cwd = temp_dir.path().abs();
-    let permission_profile = PermissionProfile::read_only();
-
-    let state = TurnMetadataState::new(
-        "session-a".to_string(),
-        &SessionSource::Exec,
-        "turn-a".to_string(),
-        cwd,
-        &permission_profile,
-        WindowsSandboxLevel::Disabled,
-        /*enforce_managed_network*/ false,
-    );
-    state.set_responsesapi_client_metadata(HashMap::from([(
-        "turn_started_at_unix_ms".to_string(),
-        "client-supplied".to_string(),
-    )]));
-
-    let header = state.current_header_value().expect("header");
-    let json: Value = serde_json::from_str(&header).expect("json");
-
-    assert!(json.get("turn_started_at_unix_ms").is_none());
-}
-
-#[test]
 fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields() {
     let temp_dir = TempDir::new().expect("temp dir");
     let cwd = temp_dir.path().abs();
-    let permission_profile = PermissionProfile::read_only();
+    let sandbox_policy = SandboxPolicy::new_read_only_policy();
 
     let state = TurnMetadataState::new(
         "session-a".to_string(),
         &SessionSource::Exec,
         "turn-a".to_string(),
         cwd,
-        &permission_profile,
+        &sandbox_policy,
         WindowsSandboxLevel::Disabled,
-        /*enforce_managed_network*/ false,
     );
     state.set_responsesapi_client_metadata(HashMap::from([
         ("fiber_run_id".to_string(), "fiber-123".to_string()),
         ("session_id".to_string(), "client-supplied".to_string()),
         ("thread_source".to_string(), "client-supplied".to_string()),
-        (
-            "turn_started_at_unix_ms".to_string(),
-            "client-supplied".to_string(),
-        ),
     ]));
-    state.set_turn_started_at_unix_ms(/*turn_started_at_unix_ms*/ 1_700_000_000_123);
 
     let header = state.current_header_value().expect("header");
     let json: Value = serde_json::from_str(&header).expect("json");
@@ -207,8 +143,4 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
     assert_eq!(json["session_id"].as_str(), Some("session-a"));
     assert_eq!(json["thread_source"].as_str(), Some("user"));
     assert_eq!(json["turn_id"].as_str(), Some("turn-a"));
-    assert_eq!(
-        json["turn_started_at_unix_ms"].as_i64(),
-        Some(1_700_000_000_123)
-    );
 }

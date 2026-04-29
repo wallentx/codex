@@ -29,7 +29,7 @@ pub async fn build_prompt_input(
     config.ephemeral = true;
 
     let auth_manager =
-        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false);
 
     let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
         config.codex_self_exe.clone(),
@@ -45,7 +45,9 @@ pub async fn build_prompt_input(
                 .features
                 .enabled(Feature::DefaultModeRequestUserInput),
         },
-        Arc::new(EnvironmentManager::new(EnvironmentManagerArgs::new(local_runtime_paths)).await),
+        Arc::new(EnvironmentManager::new(EnvironmentManagerArgs::from_env(
+            local_runtime_paths,
+        ))),
         /*analytics_events_client*/ None,
     );
     let thread = thread_manager.start_thread(config).await?;
