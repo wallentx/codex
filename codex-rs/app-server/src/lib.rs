@@ -1,12 +1,12 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 use codex_arg0::Arg0DispatchPaths;
-use codex_config::ConfigLayerStackOrdering;
-use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
 use codex_config::RemoteThreadConfigLoader;
 use codex_config::ThreadConfigLoader;
 use codex_core::config::Config;
+use codex_core::config_loader::ConfigLayerStackOrdering;
+use codex_core::config_loader::LoaderOverrides;
 use codex_exec_server::EnvironmentManagerArgs;
 use codex_features::Feature;
 use codex_login::AuthManager;
@@ -40,15 +40,13 @@ use codex_analytics::AppServerRpcTransport;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::JSONRPCMessage;
-use codex_app_server_protocol::RemoteControlStatusChangedNotification;
-use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::TextPosition as AppTextPosition;
 use codex_app_server_protocol::TextRange as AppTextRange;
-use codex_config::ConfigLoadError;
-use codex_config::TextRange as CoreTextRange;
 use codex_core::ExecPolicyError;
 use codex_core::check_execpolicy_for_warnings;
 use codex_core::config::find_codex_home;
+use codex_core::config_loader::ConfigLoadError;
+use codex_core::config_loader::TextRange as CoreTextRange;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
 use codex_feedback::CodexFeedback;
@@ -77,7 +75,6 @@ mod config;
 mod config_api;
 mod config_manager;
 mod config_manager_service;
-mod connection_rpc_gate;
 mod device_key_api;
 mod dynamic_tools;
 mod error_code;
@@ -90,7 +87,6 @@ pub mod in_process;
 mod message_processor;
 mod models;
 mod outgoing_message;
-mod request_serialization;
 mod server_request_error;
 mod thread_state;
 mod thread_status;
@@ -366,25 +362,6 @@ pub async fn run_main(
     .await
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PluginStartupTasks {
-    Start,
-    Skip,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AppServerRuntimeOptions {
-    pub plugin_startup_tasks: PluginStartupTasks,
-}
-
-impl Default for AppServerRuntimeOptions {
-    fn default() -> Self {
-        Self {
-            plugin_startup_tasks: PluginStartupTasks::Start,
-        }
-    }
-}
-
 pub async fn run_main_with_transport(
     arg0_paths: Arg0DispatchPaths,
     cli_config_overrides: CliConfigOverrides,
@@ -393,30 +370,6 @@ pub async fn run_main_with_transport(
     transport: AppServerTransport,
     session_source: SessionSource,
     auth: AppServerWebsocketAuthSettings,
-) -> IoResult<()> {
-    run_main_with_transport_options(
-        arg0_paths,
-        cli_config_overrides,
-        loader_overrides,
-        default_analytics_enabled,
-        transport,
-        session_source,
-        auth,
-        AppServerRuntimeOptions::default(),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn run_main_with_transport_options(
-    arg0_paths: Arg0DispatchPaths,
-    cli_config_overrides: CliConfigOverrides,
-    loader_overrides: LoaderOverrides,
-    default_analytics_enabled: bool,
-    transport: AppServerTransport,
-    session_source: SessionSource,
-    auth: AppServerWebsocketAuthSettings,
-    runtime_options: AppServerRuntimeOptions,
 ) -> IoResult<()> {
     let environment_manager = Arc::new(EnvironmentManager::new(EnvironmentManagerArgs::from_env(
         ExecServerRuntimePaths::from_optional_paths(
@@ -473,7 +426,7 @@ pub async fn run_main_with_transport_options(
             config_manager
                 .replace_thread_config_loader(Arc::clone(&discovered_thread_config_loader));
             let auth_manager =
-                AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+                AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false);
             config_manager.replace_cloud_requirements_loader(auth_manager, config.chatgpt_base_url);
         }
         Err(err) => {
@@ -522,7 +475,7 @@ pub async fn run_main_with_transport_options(
         });
     }
     if let Some(warning) =
-        codex_core::config::system_bwrap_warning(config.permissions.permission_profile.get())
+        codex_core::config::system_bwrap_warning(config.permissions.sandbox_policy.get())
     {
         config_warnings.push(ConfigWarningNotification {
             summary: warning,
@@ -566,13 +519,12 @@ pub async fn run_main_with_transport_options(
 
     let feedback_layer = feedback.logger_layer();
     let feedback_metadata_layer = feedback.metadata_layer();
-    let state_db_result = codex_state::StateRuntime::init(
+    let state_db = codex_state::StateRuntime::init(
         config.sqlite_home.clone(),
         config.model_provider_id.clone(),
     )
-    .await;
-    let state_db_init_error = state_db_result.as_ref().err().map(ToString::to_string);
-    let state_db = state_db_result.ok();
+    .await
+    .ok();
     let log_db = state_db.clone().map(log_db::start);
     let log_db_layer = log_db
         .clone()
@@ -592,9 +544,6 @@ pub async fn run_main_with_transport_options(
             Some(details) => error!("{} {}", warning.summary, details),
             None => error!("{}", warning.summary),
         }
-    }
-    if let Some(err) = &state_db_init_error {
-        error!("failed to initialize sqlite state db: {err}");
     }
 
     let transport_shutdown_token = CancellationToken::new();
@@ -639,21 +588,13 @@ pub async fn run_main_with_transport_options(
     }
 
     let auth_manager =
-        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false);
 
-    let remote_control_config_enabled = config.features.enabled(Feature::RemoteControl);
-    let remote_control_enabled = remote_control_config_enabled && state_db.is_some();
-    if remote_control_config_enabled && state_db.is_none() {
-        error!("remote control disabled because sqlite state db is unavailable");
-    }
+    let remote_control_enabled = config.features.enabled(Feature::RemoteControl);
     if transport_accept_handles.is_empty() && !remote_control_enabled {
         return Err(std::io::Error::new(
             ErrorKind::InvalidInput,
-            if remote_control_config_enabled && state_db.is_none() {
-                "no transport configured; remote control disabled because sqlite state db is unavailable"
-            } else {
-                "no transport configured; use --listen or enable remote control"
-            },
+            "no transport configured; use --listen or enable remote control",
         ));
     }
 
@@ -726,10 +667,9 @@ pub async fn run_main_with_transport_options(
 
     let processor_handle = tokio::spawn({
         let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(outgoing_tx));
-        let initialize_notification_sender = outgoing_message_sender.clone();
         let outbound_control_tx = outbound_control_tx;
         let auth_manager =
-            AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+            AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false);
         let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
             outgoing: outgoing_message_sender,
             arg0_paths,
@@ -742,14 +682,11 @@ pub async fn run_main_with_transport_options(
             session_source,
             auth_manager,
             rpc_transport: analytics_rpc_transport(&transport),
-            remote_control_handle: Some(remote_control_handle.clone()),
-            plugin_startup_tasks: runtime_options.plugin_startup_tasks,
+            remote_control_handle: Some(remote_control_handle),
         }));
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();
         let mut connections = HashMap::<ConnectionId, ConnectionState>::new();
-        let mut remote_control_status_rx = remote_control_handle.status_receiver();
-        let mut remote_control_status = remote_control_status_rx.borrow().clone();
         let transport_shutdown_token = transport_shutdown_token.clone();
         async move {
             let mut listen_for_threads = true;
@@ -828,9 +765,9 @@ pub async fn run_main_with_transport_options(
                                 );
                             }
                             TransportEvent::ConnectionClosed { connection_id } => {
-                                let Some(connection_state) = connections.remove(&connection_id) else {
+                                if connections.remove(&connection_id).is_none() {
                                     continue;
-                                };
+                                }
                                 if outbound_control_tx
                                     .send(OutboundControlEvent::Closed { connection_id })
                                     .await
@@ -838,7 +775,7 @@ pub async fn run_main_with_transport_options(
                                 {
                                     break;
                                 }
-                                processor.connection_closed(connection_id, &connection_state.session).await;
+                                processor.connection_closed(connection_id).await;
                                 if shutdown_when_no_connections && connections.is_empty() {
                                     break;
                                 }
@@ -889,14 +826,6 @@ pub async fn run_main_with_transport_options(
                                                     connection_id,
                                                 )
                                                 .await;
-                                            initialize_notification_sender
-                                                .send_server_notification_to_connections(
-                                                    &[connection_id],
-                                                    ServerNotification::RemoteControlStatusChanged(
-                                                        remote_control_status.clone(),
-                                                    ),
-                                                )
-                                                .await;
                                             processor.connection_initialized(connection_id).await;
                                             connection_state
                                                 .outbound_initialized
@@ -927,24 +856,6 @@ pub async fn run_main_with_transport_options(
                                 }
                             }
                         }
-                    }
-                    changed = remote_control_status_rx.changed() => {
-                        if changed.is_err() {
-                            continue;
-                        }
-                        let status = remote_control_status_rx.borrow().clone();
-                        if remote_control_status == status {
-                            continue;
-                        }
-                        remote_control_status = status.clone();
-                        initialize_notification_sender
-                            .send_server_notification(ServerNotification::RemoteControlStatusChanged(
-                                RemoteControlStatusChangedNotification {
-                                    status: status.status,
-                                    environment_id: status.environment_id,
-                                },
-                            ))
-                            .await;
                     }
                     created = thread_created_rx.recv(), if listen_for_threads => {
                         match created {
@@ -978,12 +889,6 @@ pub async fn run_main_with_transport_options(
             }
 
             if !shutdown_state.forced() {
-                futures::future::join_all(
-                    connections
-                        .values()
-                        .map(|connection_state| connection_state.session.rpc_gate.shutdown()),
-                )
-                .await;
                 processor.drain_background_tasks().await;
                 processor.shutdown_threads().await;
             }

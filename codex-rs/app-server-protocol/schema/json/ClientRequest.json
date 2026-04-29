@@ -218,6 +218,17 @@
             "null"
           ]
         },
+        "permissionProfile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PermissionProfile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional full permissions profile for this command.\n\nDefaults to the user's configured permissions when omitted. Cannot be combined with `sandboxPolicy`."
+        },
         "processId": {
           "description": "Optional client-supplied, connection-scoped process id.\n\nRequired for `tty`, `streamStdin`, `streamStdoutStderr`, and follow-up `command/exec/write`, `command/exec/resize`, and `command/exec/terminate` calls. When omitted, buffered execution gets an internal id that is not exposed to the client.",
           "type": [
@@ -849,8 +860,7 @@
         "CONFIG",
         "SKILLS",
         "PLUGINS",
-        "MCP_SERVER_CONFIG",
-        "SESSIONS"
+        "MCP_SERVER_CONFIG"
       ],
       "type": "string"
     },
@@ -1016,6 +1026,21 @@
             "kind"
           ],
           "title": "MinimalFileSystemSpecialPath",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "current_working_directory"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "CurrentWorkingDirectoryFileSystemSpecialPath",
           "type": "object"
         },
         {
@@ -1388,6 +1413,38 @@
           "type": "boolean"
         }
       },
+      "type": "object"
+    },
+    "GhostCommit": {
+      "description": "Details of a ghost commit created from a repository state.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "parent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preexisting_untracked_dirs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "preexisting_untracked_files": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "preexisting_untracked_dirs",
+        "preexisting_untracked_files"
+      ],
       "type": "object"
     },
     "ImageDetail": {
@@ -1780,20 +1837,15 @@
     "MigrationDetails": {
       "properties": {
         "plugins": {
-          "default": [],
           "items": {
             "$ref": "#/definitions/PluginsMigration"
           },
           "type": "array"
-        },
-        "sessions": {
-          "default": [],
-          "items": {
-            "$ref": "#/definitions/SessionMigration"
-          },
-          "type": "array"
         }
       },
+      "required": [
+        "plugins"
+      ],
       "type": "object"
     },
     "ModeKind": {
@@ -2074,6 +2126,53 @@
       ],
       "type": "object"
     },
+    "ReadOnlyAccess": {
+      "oneOf": [
+        {
+          "properties": {
+            "includePlatformDefaults": {
+              "default": true,
+              "type": "boolean"
+            },
+            "readableRoots": {
+              "default": [],
+              "items": {
+                "$ref": "#/definitions/AbsolutePathBuf"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "restricted"
+              ],
+              "title": "RestrictedReadOnlyAccessType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "RestrictedReadOnlyAccess",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "fullAccess"
+              ],
+              "title": "FullAccessReadOnlyAccessType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "FullAccessReadOnlyAccess",
+          "type": "object"
+        }
+      ]
+    },
     "RealtimeOutputModality": {
       "enum": [
         "text",
@@ -2239,6 +2338,12 @@
                 "$ref": "#/definitions/ContentItem"
               },
               "type": "array"
+            },
+            "end_turn": {
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "id": {
               "type": [
@@ -2641,6 +2746,26 @@
         },
         {
           "properties": {
+            "ghost_commit": {
+              "$ref": "#/definitions/GhostCommit"
+            },
+            "type": {
+              "enum": [
+                "ghost_snapshot"
+              ],
+              "title": "GhostSnapshotResponseItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "ghost_commit",
+            "type"
+          ],
+          "title": "GhostSnapshotResponseItem",
+          "type": "object"
+        },
+        {
+          "properties": {
             "encrypted_content": {
               "type": "string"
             },
@@ -2931,6 +3056,16 @@
         },
         {
           "properties": {
+            "access": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ReadOnlyAccess"
+                }
+              ],
+              "default": {
+                "type": "fullAccess"
+              }
+            },
             "networkAccess": {
               "default": false,
               "type": "boolean"
@@ -2987,6 +3122,16 @@
               "default": false,
               "type": "boolean"
             },
+            "readOnlyAccess": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ReadOnlyAccess"
+                }
+              ],
+              "default": {
+                "type": "fullAccess"
+              }
+            },
             "type": {
               "enum": [
                 "workspaceWrite"
@@ -3027,27 +3172,6 @@
         "flex"
       ],
       "type": "string"
-    },
-    "SessionMigration": {
-      "properties": {
-        "cwd": {
-          "type": "string"
-        },
-        "path": {
-          "type": "string"
-        },
-        "title": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "cwd",
-        "path"
-      ],
-      "type": "object"
     },
     "Settings": {
       "description": "Settings for a collaboration mode.",
@@ -3287,6 +3411,17 @@
             "null"
           ]
         },
+        "permissionProfile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PermissionProfile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Full permissions override for the forked thread. Cannot be combined with `sandbox`."
+        },
         "sandbox": {
           "anyOf": [
             {
@@ -3322,15 +3457,6 @@
         "threadId"
       ],
       "type": "object"
-    },
-    "ThreadGoalStatus": {
-      "enum": [
-        "active",
-        "paused",
-        "budgetLimited",
-        "complete"
-      ],
-      "type": "string"
     },
     "ThreadInjectItemsParams": {
       "properties": {
@@ -3692,6 +3818,17 @@
             "null"
           ]
         },
+        "permissionProfile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PermissionProfile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Full permissions override for the resumed thread. Cannot be combined with `sandbox`."
+        },
         "personality": {
           "anyOf": [
             {
@@ -3874,6 +4011,17 @@
             "string",
             "null"
           ]
+        },
+        "permissionProfile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PermissionProfile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Full permissions override for this thread. Cannot be combined with `sandbox`."
         },
         "personality": {
           "anyOf": [
@@ -4085,6 +4233,17 @@
         },
         "outputSchema": {
           "description": "Optional JSON Schema used to constrain the final assistant message for this turn."
+        },
+        "permissionProfile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PermissionProfile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Override the full permissions profile for this turn and subsequent turns. Cannot be combined with `sandboxPolicy`."
         },
         "personality": {
           "anyOf": [

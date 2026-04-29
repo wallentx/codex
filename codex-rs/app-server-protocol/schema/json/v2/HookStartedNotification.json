@@ -160,7 +160,6 @@
         "project",
         "mdm",
         "sessionFlags",
-        "plugin",
         "legacyManagedConfigFile",
         "legacyManagedConfigMdm",
         "unknown"

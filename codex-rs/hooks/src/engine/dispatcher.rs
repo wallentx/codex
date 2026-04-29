@@ -164,7 +164,6 @@ mod tests {
             source_path: test_path_buf("/tmp/hooks.json").abs(),
             source: HookSource::User,
             display_order,
-            env: std::collections::HashMap::new(),
         }
     }
 

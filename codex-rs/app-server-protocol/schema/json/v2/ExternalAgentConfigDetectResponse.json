@@ -39,28 +39,22 @@
         "CONFIG",
         "SKILLS",
         "PLUGINS",
-        "MCP_SERVER_CONFIG",
-        "SESSIONS"
+        "MCP_SERVER_CONFIG"
       ],
       "type": "string"
     },
     "MigrationDetails": {
       "properties": {
         "plugins": {
-          "default": [],
           "items": {
             "$ref": "#/definitions/PluginsMigration"
           },
           "type": "array"
-        },
-        "sessions": {
-          "default": [],
-          "items": {
-            "$ref": "#/definitions/SessionMigration"
-          },
-          "type": "array"
         }
       },
+      "required": [
+        "plugins"
+      ],
       "type": "object"
     },
     "PluginsMigration": {
@@ -78,27 +72,6 @@
       "required": [
         "marketplaceName",
         "pluginNames"
-      ],
-      "type": "object"
-    },
-    "SessionMigration": {
-      "properties": {
-        "cwd": {
-          "type": "string"
-        },
-        "path": {
-          "type": "string"
-        },
-        "title": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "cwd",
-        "path"
       ],
       "type": "object"
     }
