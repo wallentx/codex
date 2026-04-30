@@ -1,10 +1,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use anyhow::Context;
 use anyhow::Result;
 use codex_config::types::ApprovalsReviewer;
 use codex_core::CodexThread;
 use codex_core::config::Constrained;
+use codex_core::config_loader::ConfigLayerStack;
+use codex_core::config_loader::ConfigLayerStackOrdering;
+use codex_core::config_loader::NetworkConstraints;
+use codex_core::config_loader::NetworkRequirementsToml;
+use codex_core::config_loader::RequirementSource;
+use codex_core::config_loader::Sourced;
 use codex_core::sandboxing::SandboxPermissions;
 use codex_features::Feature;
 use codex_protocol::approvals::NetworkApprovalProtocol;
@@ -19,7 +24,6 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::user_input::UserInput;
-use core_test_support::managed_network_requirements_loader;
 use core_test_support::responses::ev_apply_patch_function_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -32,11 +36,10 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
-use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_with_timeout;
 use core_test_support::zsh_fork::build_zsh_fork_test;
-use core_test_support::zsh_fork::restrictive_workspace_write_profile;
+use core_test_support::zsh_fork::restrictive_workspace_write_policy;
 use core_test_support::zsh_fork::zsh_fork_runtime;
 use pretty_assertions::assert_eq;
 use regex_lite::Regex;
@@ -48,7 +51,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
-use test_case::test_case;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::Request;
@@ -568,15 +570,6 @@ struct ScenarioSpec {
     expectation: Expectation,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ScenarioGroup {
-    DangerFullAccess,
-    ReadOnly,
-    WorkspaceWrite,
-    ApplyPatch,
-    UnifiedExec,
-}
-
 struct CommandResult {
     exit_code: Option<i64>,
     stdout: String,
@@ -775,6 +768,7 @@ fn scenarios() -> Vec<ScenarioSpec> {
 
     let workspace_write = |network_access| SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![],
+        read_only_access: Default::default(),
         network_access,
         exclude_tmpdir_env_var: false,
         exclude_slash_tmp: false,
@@ -1666,50 +1660,15 @@ fn scenarios() -> Vec<ScenarioSpec> {
     ]
 }
 
-#[test_case(ScenarioGroup::DangerFullAccess ; "danger_full_access")]
-#[test_case(ScenarioGroup::ReadOnly ; "read_only")]
-#[test_case(ScenarioGroup::WorkspaceWrite ; "workspace_write")]
-#[test_case(ScenarioGroup::ApplyPatch ; "apply_patch")]
-#[test_case(ScenarioGroup::UnifiedExec ; "unified_exec")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn approval_matrix_covers_group(group: ScenarioGroup) -> Result<()> {
-    run_scenario_group(group).await
-}
-
-async fn run_scenario_group(group: ScenarioGroup) -> Result<()> {
+async fn approval_matrix_covers_all_modes() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let scenarios = scenarios()
-        .into_iter()
-        .filter(|scenario| scenario_group(scenario) == group)
-        .collect::<Vec<_>>();
-    assert!(!scenarios.is_empty(), "expected scenarios for {group:?}");
-
-    for scenario in scenarios {
-        run_scenario(&scenario)
-            .await
-            .with_context(|| format!("approval scenario failed: {}", scenario.name))?;
+    for scenario in scenarios() {
+        run_scenario(&scenario).await?;
     }
 
     Ok(())
-}
-
-fn scenario_group(scenario: &ScenarioSpec) -> ScenarioGroup {
-    match &scenario.action {
-        ActionKind::ApplyPatchFunction { .. } | ActionKind::ApplyPatchShell { .. } => {
-            ScenarioGroup::ApplyPatch
-        }
-        ActionKind::RunUnifiedExecCommand { .. } => ScenarioGroup::UnifiedExec,
-        ActionKind::WriteFile { .. }
-        | ActionKind::FetchUrlNoProxy { .. }
-        | ActionKind::FetchUrl { .. }
-        | ActionKind::RunCommand { .. } => match &scenario.sandbox_policy {
-            SandboxPolicy::DangerFullAccess => ScenarioGroup::DangerFullAccess,
-            SandboxPolicy::ReadOnly { .. } => ScenarioGroup::ReadOnly,
-            SandboxPolicy::WorkspaceWrite { .. } => ScenarioGroup::WorkspaceWrite,
-            SandboxPolicy::ExternalSandbox { .. } => ScenarioGroup::WorkspaceWrite,
-        },
-    }
 }
 
 async fn run_scenario(scenario: &ScenarioSpec) -> Result<()> {
@@ -1723,9 +1682,7 @@ async fn run_scenario(scenario: &ScenarioSpec) -> Result<()> {
 
     let mut builder = test_codex().with_model(model).with_config(move |config| {
         config.permissions.approval_policy = Constrained::allow_any(approval_policy);
-        config
-            .set_legacy_sandbox_policy(sandbox_policy.clone())
-            .expect("set sandbox policy");
+        config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy.clone());
         for feature in features {
             config
                 .features
@@ -1842,6 +1799,7 @@ async fn approving_apply_patch_for_session_skips_future_prompts_for_same_file() 
     let approval_policy = AskForApproval::OnRequest;
     let sandbox_policy = SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![],
+        read_only_access: Default::default(),
         network_access: false,
         exclude_tmpdir_env_var: false,
         exclude_slash_tmp: false,
@@ -1852,9 +1810,7 @@ async fn approving_apply_patch_for_session_skips_future_prompts_for_same_file() 
         .with_model("gpt-5.4")
         .with_config(move |config| {
             config.permissions.approval_policy = Constrained::allow_any(approval_policy);
-            config
-                .set_legacy_sandbox_policy(sandbox_policy_for_config)
-                .expect("set sandbox policy");
+            config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy_for_config);
             config.approvals_reviewer = ApprovalsReviewer::User;
         });
     let test = builder.build(&server).await?;
@@ -1962,9 +1918,7 @@ async fn approving_execpolicy_amendment_persists_policy_and_skips_future_prompts
     let sandbox_policy_for_config = sandbox_policy.clone();
     let mut builder = test_codex().with_config(move |config| {
         config.permissions.approval_policy = Constrained::allow_any(approval_policy);
-        config
-            .set_legacy_sandbox_policy(sandbox_policy_for_config)
-            .expect("set sandbox policy");
+        config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy_for_config);
     });
     let test = builder.build(&server).await?;
     let allow_prefix_path = test.cwd.path().join("allow-prefix.txt");
@@ -2135,9 +2089,7 @@ async fn spawned_subagent_execpolicy_amendment_propagates_to_parent_session() ->
     let sandbox_policy_for_config = sandbox_policy.clone();
     let mut builder = test_codex().with_config(move |config| {
         config.permissions.approval_policy = Constrained::allow_any(approval_policy);
-        config
-            .set_legacy_sandbox_policy(sandbox_policy_for_config)
-            .expect("set sandbox policy");
+        config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy_for_config);
         config
             .features
             .enable(Feature::Collab)
@@ -2319,7 +2271,7 @@ async fn matched_prefix_rule_runs_unsandboxed_under_zsh_fork() -> Result<()> {
     };
 
     let approval_policy = AskForApproval::Never;
-    let permission_profile = restrictive_workspace_write_profile();
+    let sandbox_policy = restrictive_workspace_write_policy();
     let outside_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
     let outside_path = outside_dir
         .path()
@@ -2333,7 +2285,7 @@ async fn matched_prefix_rule_runs_unsandboxed_under_zsh_fork() -> Result<()> {
         &server,
         runtime,
         approval_policy,
-        permission_profile.clone(),
+        sandbox_policy.clone(),
         move |home| {
             let _ = fs::remove_file(&outside_path_for_hook);
             let rules_dir = home.join("rules");
@@ -2368,30 +2320,13 @@ async fn matched_prefix_rule_runs_unsandboxed_under_zsh_fork() -> Result<()> {
     )
     .await;
 
-    let session_model = test.session_configured.model.clone();
-    let (sandbox_policy, permission_profile) =
-        turn_permission_fields(permission_profile, test.cwd.path());
-    test.codex
-        .submit(Op::UserTurn {
-            environments: None,
-            items: vec![UserInput::Text {
-                text: "run allowed touch under zsh fork".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            cwd: test.cwd.path().to_path_buf(),
-            approval_policy,
-            approvals_reviewer: Some(ApprovalsReviewer::User),
-            sandbox_policy,
-            permission_profile,
-            model: session_model,
-            effort: None,
-            summary: None,
-            service_tier: None,
-            collaboration_mode: None,
-            personality: None,
-        })
-        .await?;
+    submit_turn(
+        &test,
+        "run allowed touch under zsh fork",
+        approval_policy,
+        sandbox_policy,
+    )
+    .await?;
 
     wait_for_completion_without_approval(&test).await;
 
@@ -2415,9 +2350,7 @@ async fn invalid_requested_prefix_rule_falls_back_for_compound_command() -> Resu
     let sandbox_policy_for_config = sandbox_policy.clone();
     let mut builder = test_codex().with_config(move |config| {
         config.permissions.approval_policy = Constrained::allow_any(approval_policy);
-        config
-            .set_legacy_sandbox_policy(sandbox_policy_for_config)
-            .expect("set sandbox policy");
+        config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy_for_config);
     });
     let test = builder.build(&server).await?;
 
@@ -2468,9 +2401,7 @@ async fn approving_fallback_rule_for_compound_command_works() -> Result<()> {
     let sandbox_policy_for_config = sandbox_policy.clone();
     let mut builder = test_codex().with_config(move |config| {
         config.permissions.approval_policy = Constrained::allow_any(approval_policy);
-        config
-            .set_legacy_sandbox_policy(sandbox_policy_for_config)
-            .expect("set sandbox policy");
+        config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy_for_config);
     });
     let test = builder.build(&server).await?;
 
@@ -2598,20 +2529,42 @@ allow_local_binding = true
     let approval_policy = AskForApproval::OnFailure;
     let sandbox_policy = SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![],
+        read_only_access: Default::default(),
         network_access: true,
         exclude_tmpdir_env_var: false,
         exclude_slash_tmp: false,
     };
     let sandbox_policy_for_config = sandbox_policy.clone();
-    let mut builder = test_codex()
-        .with_home(home)
-        .with_cloud_requirements(managed_network_requirements_loader())
-        .with_config(move |config| {
-            config.permissions.approval_policy = Constrained::allow_any(approval_policy);
-            config
-                .set_legacy_sandbox_policy(sandbox_policy_for_config)
-                .expect("set sandbox policy");
+    let mut builder = test_codex().with_home(home).with_config(move |config| {
+        config.permissions.approval_policy = Constrained::allow_any(approval_policy);
+        config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy_for_config);
+        let layers = config
+            .config_layer_stack
+            .get_layers(
+                ConfigLayerStackOrdering::LowestPrecedenceFirst,
+                /*include_disabled*/ true,
+            )
+            .into_iter()
+            .cloned()
+            .collect();
+        let mut requirements = config.config_layer_stack.requirements().clone();
+        requirements.network = Some(Sourced::new(
+            NetworkConstraints {
+                enabled: Some(true),
+                allow_local_binding: Some(true),
+                ..Default::default()
+            },
+            RequirementSource::CloudRequirements,
+        ));
+        let mut requirements_toml = config.config_layer_stack.requirements_toml().clone();
+        requirements_toml.network = Some(NetworkRequirementsToml {
+            enabled: Some(true),
+            allow_local_binding: Some(true),
+            ..Default::default()
         });
+        config.config_layer_stack = ConfigLayerStack::new(layers, requirements, requirements_toml)
+            .expect("rebuild config layer stack with network requirements");
+    });
     let test = builder.build(&server).await?;
     assert!(
         test.config.managed_network_requirements_enabled(),
@@ -2878,21 +2831,41 @@ allow_local_binding = true
     let approval_policy = AskForApproval::OnFailure;
     let turn_sandbox_policy = SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![],
+        read_only_access: Default::default(),
         network_access: true,
         exclude_tmpdir_env_var: false,
         exclude_slash_tmp: false,
     };
-    let mut builder = test_codex()
-        .with_home(home)
-        .with_cloud_requirements(managed_network_requirements_loader())
-        .with_config(move |config| {
-            config.permissions.approval_policy = Constrained::allow_any(approval_policy);
-            let cwd = config.cwd.clone();
-            config
-                .permissions
-                .set_legacy_sandbox_policy(SandboxPolicy::DangerFullAccess, cwd.as_path())
-                .expect("test setup should allow sandbox policy");
+    let mut builder = test_codex().with_home(home).with_config(move |config| {
+        config.permissions.approval_policy = Constrained::allow_any(approval_policy);
+        config.permissions.sandbox_policy = Constrained::allow_any(SandboxPolicy::DangerFullAccess);
+        let layers = config
+            .config_layer_stack
+            .get_layers(
+                ConfigLayerStackOrdering::LowestPrecedenceFirst,
+                /*include_disabled*/ true,
+            )
+            .into_iter()
+            .cloned()
+            .collect();
+        let mut requirements = config.config_layer_stack.requirements().clone();
+        requirements.network = Some(Sourced::new(
+            NetworkConstraints {
+                enabled: Some(true),
+                allow_local_binding: Some(true),
+                ..Default::default()
+            },
+            RequirementSource::CloudRequirements,
+        ));
+        let mut requirements_toml = config.config_layer_stack.requirements_toml().clone();
+        requirements_toml.network = Some(NetworkRequirementsToml {
+            enabled: Some(true),
+            allow_local_binding: Some(true),
+            ..Default::default()
         });
+        config.config_layer_stack = ConfigLayerStack::new(layers, requirements, requirements_toml)
+            .expect("rebuild config layer stack with network requirements");
+    });
     let test = builder.build(&server).await?;
     assert!(
         !test.config.managed_network_requirements_enabled(),
@@ -3011,9 +2984,7 @@ async fn compound_command_with_one_safe_command_still_requires_approval() -> Res
     let sandbox_policy_for_config = sandbox_policy.clone();
     let mut builder = test_codex().with_config(move |config| {
         config.permissions.approval_policy = Constrained::allow_any(approval_policy);
-        config
-            .set_legacy_sandbox_policy(sandbox_policy_for_config)
-            .expect("set sandbox policy");
+        config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy_for_config);
     });
     let test = builder.build(&server).await?;
 

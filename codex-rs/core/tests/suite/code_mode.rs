@@ -11,10 +11,10 @@ use codex_models_manager::bundled_models_response;
 use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
-use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::user_input::UserInput;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::assert_regex_match;
@@ -30,7 +30,6 @@ use core_test_support::skip_if_no_network;
 use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
-use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
@@ -2556,7 +2555,6 @@ async fn code_mode_can_call_hidden_dynamic_tools() -> Result<()> {
         .thread_manager
         .start_thread_with_tools(
             base_test.config.clone(),
-            codex_core::thread_store_from_config(&base_test.config),
             vec![DynamicToolSpec {
                 namespace: Some("codex_app".to_string()),
                 name: "hidden_dynamic_tool".to_string(),
@@ -2609,10 +2607,6 @@ text(
     )
     .await;
 
-    let cwd = test.cwd.path().to_path_buf();
-    let (sandbox_policy, permission_profile) =
-        turn_permission_fields(PermissionProfile::Disabled, cwd.as_path());
-
     test.codex
         .submit(Op::UserTurn {
             environments: None,
@@ -2621,11 +2615,11 @@ text(
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
-            cwd,
+            cwd: test.cwd.path().to_path_buf(),
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
-            sandbox_policy,
-            permission_profile,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
             model: test.session_configured.model.clone(),
             effort: None,
             summary: None,

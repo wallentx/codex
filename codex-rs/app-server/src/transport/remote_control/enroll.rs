@@ -38,15 +38,13 @@ pub(super) async fn load_persisted_remote_control_enrollment(
     remote_control_target: &RemoteControlTarget,
     account_id: &str,
     app_server_client_name: Option<&str>,
-) -> io::Result<Option<RemoteControlEnrollment>> {
+) -> Option<RemoteControlEnrollment> {
     let Some(state_db) = state_db else {
-        return Err(io::Error::new(
-            ErrorKind::NotFound,
-            format!(
-                "remote control enrollment cache unavailable because sqlite state db is disabled: websocket_url={}, account_id={}, app_server_client_name={:?}",
-                remote_control_target.websocket_url, account_id, app_server_client_name
-            ),
-        ));
+        info!(
+            "remote control enrollment cache unavailable because sqlite state db is disabled: websocket_url={}, account_id={}, app_server_client_name={:?}",
+            remote_control_target.websocket_url, account_id, app_server_client_name
+        );
+        return None;
     };
     let enrollment = match state_db
         .get_remote_control_enrollment(
@@ -62,7 +60,7 @@ pub(super) async fn load_persisted_remote_control_enrollment(
                 "failed to load persisted remote control enrollment: websocket_url={}, account_id={}, app_server_client_name={:?}, err={err}",
                 remote_control_target.websocket_url, account_id, app_server_client_name
             );
-            return Err(io::Error::other(err));
+            return None;
         }
     };
 
@@ -76,19 +74,19 @@ pub(super) async fn load_persisted_remote_control_enrollment(
                 enrollment.server_id,
                 enrollment.environment_id
             );
-            Ok(Some(RemoteControlEnrollment {
+            Some(RemoteControlEnrollment {
                 account_id: enrollment.account_id,
                 environment_id: enrollment.environment_id,
                 server_id: enrollment.server_id,
                 server_name: enrollment.server_name,
-            }))
+            })
         }
         None => {
             info!(
                 "no persisted remote control enrollment found: websocket_url={}, account_id={}, app_server_client_name={:?}",
                 remote_control_target.websocket_url, account_id, app_server_client_name
             );
-            Ok(None)
+            None
         }
     }
 }
@@ -101,16 +99,14 @@ pub(super) async fn update_persisted_remote_control_enrollment(
     enrollment: Option<&RemoteControlEnrollment>,
 ) -> io::Result<()> {
     let Some(state_db) = state_db else {
-        return Err(io::Error::new(
-            ErrorKind::NotFound,
-            format!(
-                "remote control enrollment persistence unavailable because sqlite state db is disabled: websocket_url={}, account_id={}, app_server_client_name={:?}, has_enrollment={}",
-                remote_control_target.websocket_url,
-                account_id,
-                app_server_client_name,
-                enrollment.is_some()
-            ),
-        ));
+        info!(
+            "skipping remote control enrollment persistence because sqlite state db is disabled: websocket_url={}, account_id={}, app_server_client_name={:?}, has_enrollment={}",
+            remote_control_target.websocket_url,
+            account_id,
+            app_server_client_name,
+            enrollment.is_some()
+        );
+        return Ok(());
     };
     if let &Some(enrollment) = &enrollment
         && enrollment.account_id != account_id
@@ -326,8 +322,7 @@ mod tests {
                 "account-a",
                 Some("desktop-client"),
             )
-            .await
-            .expect("first enrollment should load"),
+            .await,
             Some(first_enrollment.clone())
         );
         assert_eq!(
@@ -337,8 +332,7 @@ mod tests {
                 "account-b",
                 Some("desktop-client"),
             )
-            .await
-            .expect("missing account should load"),
+            .await,
             None
         );
         assert_eq!(
@@ -348,8 +342,7 @@ mod tests {
                 "account-a",
                 Some("desktop-client"),
             )
-            .await
-            .expect("second enrollment should load"),
+            .await,
             Some(second_enrollment)
         );
     }
@@ -412,8 +405,7 @@ mod tests {
                 "account-a",
                 /*app_server_client_name*/ None,
             )
-            .await
-            .expect("cleared enrollment should load"),
+            .await,
             None
         );
         assert_eq!(
@@ -423,8 +415,7 @@ mod tests {
                 "account-a",
                 /*app_server_client_name*/ None,
             )
-            .await
-            .expect("remaining enrollment should load"),
+            .await,
             Some(second_enrollment)
         );
     }

@@ -1,8 +1,9 @@
+use crate::codex_message_processor::ApiVersion;
 use crate::codex_message_processor::read_rollout_items_from_rollout;
 use crate::codex_message_processor::read_summary_from_rollout;
 use crate::codex_message_processor::summary_to_thread;
-use crate::error_code::internal_error;
-use crate::error_code::invalid_request;
+use crate::error_code::INTERNAL_ERROR_CODE;
+use crate::error_code::INVALID_REQUEST_ERROR_CODE;
 use crate::outgoing_message::ClientRequestResult;
 use crate::outgoing_message::ThreadScopedOutgoingMessageSender;
 use crate::server_request_error::is_turn_transition_server_request_error;
@@ -15,6 +16,8 @@ use codex_analytics::AnalyticsEventsClient;
 use codex_app_server_protocol::AccountRateLimitsUpdatedNotification;
 use codex_app_server_protocol::AdditionalPermissionProfile as V2AdditionalPermissionProfile;
 use codex_app_server_protocol::AgentMessageDeltaNotification;
+use codex_app_server_protocol::ApplyPatchApprovalParams;
+use codex_app_server_protocol::ApplyPatchApprovalResponse;
 use codex_app_server_protocol::CodexErrorInfo as V2CodexErrorInfo;
 use codex_app_server_protocol::CollabAgentState as V2CollabAgentStatus;
 use codex_app_server_protocol::CollabAgentTool;
@@ -26,11 +29,14 @@ use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::CommandExecutionSource;
 use codex_app_server_protocol::CommandExecutionStatus;
+use codex_app_server_protocol::ContextCompactedNotification;
 use codex_app_server_protocol::DeprecationNoticeNotification;
 use codex_app_server_protocol::DynamicToolCallOutputContentItem;
 use codex_app_server_protocol::DynamicToolCallParams;
 use codex_app_server_protocol::DynamicToolCallStatus;
 use codex_app_server_protocol::ErrorNotification;
+use codex_app_server_protocol::ExecCommandApprovalParams;
+use codex_app_server_protocol::ExecCommandApprovalResponse;
 use codex_app_server_protocol::ExecPolicyAmendment as V2ExecPolicyAmendment;
 use codex_app_server_protocol::FileChangeApprovalDecision;
 use codex_app_server_protocol::FileChangeOutputDeltaNotification;
@@ -42,8 +48,10 @@ use codex_app_server_protocol::GrantedPermissionProfile as V2GrantedPermissionPr
 use codex_app_server_protocol::GuardianWarningNotification;
 use codex_app_server_protocol::HookCompletedNotification;
 use codex_app_server_protocol::HookStartedNotification;
+use codex_app_server_protocol::InterruptConversationResponse;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
+use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::McpServerElicitationAction;
 use codex_app_server_protocol::McpServerElicitationRequestParams;
 use codex_app_server_protocol::McpServerElicitationRequestResponse;
@@ -70,7 +78,6 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequestPayload;
 use codex_app_server_protocol::SkillsChangedNotification;
 use codex_app_server_protocol::TerminalInteractionNotification;
-use codex_app_server_protocol::ThreadGoalUpdatedNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadNameUpdatedNotification;
 use codex_app_server_protocol::ThreadRealtimeClosedNotification;
@@ -113,6 +120,7 @@ use codex_core::review_format::format_review_findings_block;
 use codex_core::review_prompts;
 use codex_protocol::ThreadId;
 use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem as CoreDynamicToolCallOutputContentItem;
+use codex_protocol::dynamic_tools::DynamicToolResponse as CoreDynamicToolResponse;
 use codex_protocol::items::parse_hook_prompt_message;
 use codex_protocol::models::AdditionalPermissionProfile as CoreAdditionalPermissionProfile;
 use codex_protocol::plan_tool::UpdatePlanArgs;
@@ -170,7 +178,7 @@ pub(crate) async fn apply_bespoke_event_handling(
     outgoing: ThreadScopedOutgoingMessageSender,
     thread_state: Arc<tokio::sync::Mutex<ThreadState>>,
     thread_watch_manager: ThreadWatchManager,
-    thread_list_state_permit: Arc<tokio::sync::Semaphore>,
+    api_version: ApiVersion,
     fallback_model_provider: String,
     codex_home: &Path,
 ) {
@@ -185,34 +193,35 @@ pub(crate) async fn apply_bespoke_event_handling(
             thread_watch_manager
                 .note_turn_started(&conversation_id.to_string())
                 .await;
-            let turn = {
-                let state = thread_state.lock().await;
-                state.active_turn_snapshot().unwrap_or_else(|| Turn {
-                    id: payload.turn_id.clone(),
-                    items: Vec::new(),
-                    error: None,
-                    status: TurnStatus::InProgress,
-                    started_at: payload.started_at,
-                    completed_at: None,
-                    duration_ms: None,
-                })
-            };
-            let notification = TurnStartedNotification {
-                thread_id: conversation_id.to_string(),
-                turn,
-            };
-            if let Some(analytics_events_client) = analytics_events_client.as_ref() {
-                analytics_events_client
-                    .track_notification(ServerNotification::TurnStarted(notification.clone()));
+            if let ApiVersion::V2 = api_version {
+                let turn = {
+                    let state = thread_state.lock().await;
+                    state.active_turn_snapshot().unwrap_or_else(|| Turn {
+                        id: payload.turn_id.clone(),
+                        items: Vec::new(),
+                        error: None,
+                        status: TurnStatus::InProgress,
+                        started_at: payload.started_at,
+                        completed_at: None,
+                        duration_ms: None,
+                    })
+                };
+                let notification = TurnStartedNotification {
+                    thread_id: conversation_id.to_string(),
+                    turn,
+                };
+                if let Some(analytics_events_client) = analytics_events_client.as_ref() {
+                    analytics_events_client
+                        .track_notification(ServerNotification::TurnStarted(notification.clone()));
+                }
+                outgoing
+                    .send_server_notification(ServerNotification::TurnStarted(notification))
+                    .await;
             }
-            outgoing
-                .send_server_notification(ServerNotification::TurnStarted(notification))
-                .await;
         }
         EventMsg::TurnComplete(turn_complete_event) => {
             // All per-thread requests are bound to a turn, so abort them.
             outgoing.abort_pending_server_requests().await;
-            respond_to_pending_interrupts(&thread_state, &outgoing).await;
             let turn_failed = thread_state.lock().await.turn_summary.last_error.is_some();
             thread_watch_manager
                 .note_turn_completed(&conversation_id.to_string(), turn_failed)
@@ -228,377 +237,435 @@ pub(crate) async fn apply_bespoke_event_handling(
             .await;
         }
         EventMsg::SkillsUpdateAvailable => {
-            outgoing
-                .send_server_notification(ServerNotification::SkillsChanged(
-                    SkillsChangedNotification {},
-                ))
-                .await;
+            if let ApiVersion::V2 = api_version {
+                outgoing
+                    .send_server_notification(ServerNotification::SkillsChanged(
+                        SkillsChangedNotification {},
+                    ))
+                    .await;
+            }
         }
         EventMsg::McpStartupUpdate(update) => {
-            let (status, error) = match update.status {
-                codex_protocol::protocol::McpStartupStatus::Starting => {
-                    (McpServerStartupState::Starting, None)
-                }
-                codex_protocol::protocol::McpStartupStatus::Ready => {
-                    (McpServerStartupState::Ready, None)
-                }
-                codex_protocol::protocol::McpStartupStatus::Failed { error } => {
-                    (McpServerStartupState::Failed, Some(error))
-                }
-                codex_protocol::protocol::McpStartupStatus::Cancelled => {
-                    (McpServerStartupState::Cancelled, None)
-                }
-            };
-            let notification = McpServerStatusUpdatedNotification {
-                name: update.server,
-                status,
-                error,
-            };
-            outgoing
-                .send_server_notification(ServerNotification::McpServerStatusUpdated(notification))
-                .await;
+            if let ApiVersion::V2 = api_version {
+                let (status, error) = match update.status {
+                    codex_protocol::protocol::McpStartupStatus::Starting => {
+                        (McpServerStartupState::Starting, None)
+                    }
+                    codex_protocol::protocol::McpStartupStatus::Ready => {
+                        (McpServerStartupState::Ready, None)
+                    }
+                    codex_protocol::protocol::McpStartupStatus::Failed { error } => {
+                        (McpServerStartupState::Failed, Some(error))
+                    }
+                    codex_protocol::protocol::McpStartupStatus::Cancelled => {
+                        (McpServerStartupState::Cancelled, None)
+                    }
+                };
+                let notification = McpServerStatusUpdatedNotification {
+                    name: update.server,
+                    status,
+                    error,
+                };
+                outgoing
+                    .send_server_notification(ServerNotification::McpServerStatusUpdated(
+                        notification,
+                    ))
+                    .await;
+            }
         }
         EventMsg::Warning(warning_event) => {
-            let notification = WarningNotification {
-                thread_id: Some(conversation_id.to_string()),
-                message: warning_event.message,
-            };
-            if let Some(analytics_events_client) = analytics_events_client.as_ref() {
-                analytics_events_client
-                    .track_notification(ServerNotification::Warning(notification.clone()));
+            if let ApiVersion::V2 = api_version {
+                let notification = WarningNotification {
+                    thread_id: Some(conversation_id.to_string()),
+                    message: warning_event.message,
+                };
+                if let Some(analytics_events_client) = analytics_events_client.as_ref() {
+                    analytics_events_client
+                        .track_notification(ServerNotification::Warning(notification.clone()));
+                }
+                outgoing
+                    .send_server_notification(ServerNotification::Warning(notification))
+                    .await;
             }
-            outgoing
-                .send_server_notification(ServerNotification::Warning(notification))
-                .await;
         }
         EventMsg::GuardianWarning(warning_event) => {
-            let notification = GuardianWarningNotification {
-                thread_id: conversation_id.to_string(),
-                message: warning_event.message,
-            };
-            if let Some(analytics_events_client) = analytics_events_client.as_ref() {
-                analytics_events_client
-                    .track_notification(ServerNotification::GuardianWarning(notification.clone()));
+            if let ApiVersion::V2 = api_version {
+                let notification = GuardianWarningNotification {
+                    thread_id: conversation_id.to_string(),
+                    message: warning_event.message,
+                };
+                if let Some(analytics_events_client) = analytics_events_client.as_ref() {
+                    analytics_events_client.track_notification(
+                        ServerNotification::GuardianWarning(notification.clone()),
+                    );
+                }
+                outgoing
+                    .send_server_notification(ServerNotification::GuardianWarning(notification))
+                    .await;
             }
-            outgoing
-                .send_server_notification(ServerNotification::GuardianWarning(notification))
-                .await;
         }
         EventMsg::GuardianAssessment(assessment) => {
-            let pending_command_execution = match build_item_from_guardian_event(
-                &assessment,
-                CommandExecutionStatus::InProgress,
-            ) {
-                Some(ThreadItem::CommandExecution {
-                    id,
-                    command,
-                    cwd,
-                    command_actions,
-                    ..
-                }) => Some((
-                    id,
-                    CommandExecutionCompletionItem {
+            if let ApiVersion::V2 = api_version {
+                let pending_command_execution = match build_item_from_guardian_event(
+                    &assessment,
+                    CommandExecutionStatus::InProgress,
+                ) {
+                    Some(ThreadItem::CommandExecution {
+                        id,
                         command,
                         cwd,
                         command_actions,
-                    },
-                )),
-                Some(_) | None => None,
-            };
-            let assessment_turn_id = if assessment.turn_id.is_empty() {
-                event_turn_id.clone()
-            } else {
-                assessment.turn_id.clone()
-            };
-            if assessment.status == codex_protocol::protocol::GuardianAssessmentStatus::InProgress
-                && let Some((target_item_id, completion_item)) = pending_command_execution.as_ref()
-            {
-                start_command_execution_item(
-                    &conversation_id,
-                    assessment_turn_id.clone(),
-                    target_item_id.clone(),
-                    completion_item.command.clone(),
-                    completion_item.cwd.clone(),
-                    completion_item.command_actions.clone(),
-                    CommandExecutionSource::Agent,
-                    &outgoing,
-                    &thread_state,
-                )
-                .await;
-            }
-            let notification = guardian_auto_approval_review_notification(
-                &conversation_id,
-                &event_turn_id,
-                &assessment,
-            );
-            outgoing.send_server_notification(notification).await;
-            let completion_status = match assessment.status {
-                codex_protocol::protocol::GuardianAssessmentStatus::Denied
-                | codex_protocol::protocol::GuardianAssessmentStatus::Aborted => {
-                    Some(CommandExecutionStatus::Declined)
+                        ..
+                    }) => Some((
+                        id,
+                        CommandExecutionCompletionItem {
+                            command,
+                            cwd,
+                            command_actions,
+                        },
+                    )),
+                    Some(_) | None => None,
+                };
+                let assessment_turn_id = if assessment.turn_id.is_empty() {
+                    event_turn_id.clone()
+                } else {
+                    assessment.turn_id.clone()
+                };
+                if assessment.status
+                    == codex_protocol::protocol::GuardianAssessmentStatus::InProgress
+                    && let Some((target_item_id, completion_item)) =
+                        pending_command_execution.as_ref()
+                {
+                    start_command_execution_item(
+                        &conversation_id,
+                        assessment_turn_id.clone(),
+                        target_item_id.clone(),
+                        completion_item.command.clone(),
+                        completion_item.cwd.clone(),
+                        completion_item.command_actions.clone(),
+                        CommandExecutionSource::Agent,
+                        &outgoing,
+                        &thread_state,
+                    )
+                    .await;
                 }
-                codex_protocol::protocol::GuardianAssessmentStatus::TimedOut => {
-                    Some(CommandExecutionStatus::Failed)
-                }
-                codex_protocol::protocol::GuardianAssessmentStatus::InProgress
-                | codex_protocol::protocol::GuardianAssessmentStatus::Approved => None,
-            };
-            if let Some(completion_status) = completion_status
-                && let Some((target_item_id, completion_item)) = pending_command_execution
-            {
-                complete_command_execution_item(
+                let notification = guardian_auto_approval_review_notification(
                     &conversation_id,
-                    assessment_turn_id,
-                    target_item_id,
-                    completion_item.command,
-                    completion_item.cwd,
-                    /*process_id*/ None,
-                    CommandExecutionSource::Agent,
-                    completion_item.command_actions,
-                    completion_status,
-                    &outgoing,
-                    &thread_state,
-                )
-                .await;
+                    &event_turn_id,
+                    &assessment,
+                );
+                outgoing.send_server_notification(notification).await;
+                let completion_status = match assessment.status {
+                    codex_protocol::protocol::GuardianAssessmentStatus::Denied
+                    | codex_protocol::protocol::GuardianAssessmentStatus::Aborted => {
+                        Some(CommandExecutionStatus::Declined)
+                    }
+                    codex_protocol::protocol::GuardianAssessmentStatus::TimedOut => {
+                        Some(CommandExecutionStatus::Failed)
+                    }
+                    codex_protocol::protocol::GuardianAssessmentStatus::InProgress
+                    | codex_protocol::protocol::GuardianAssessmentStatus::Approved => None,
+                };
+                if let Some(completion_status) = completion_status
+                    && let Some((target_item_id, completion_item)) = pending_command_execution
+                {
+                    complete_command_execution_item(
+                        &conversation_id,
+                        assessment_turn_id,
+                        target_item_id,
+                        completion_item.command,
+                        completion_item.cwd,
+                        /*process_id*/ None,
+                        CommandExecutionSource::Agent,
+                        completion_item.command_actions,
+                        completion_status,
+                        &outgoing,
+                        &thread_state,
+                    )
+                    .await;
+                }
             }
         }
         EventMsg::ModelReroute(event) => {
-            let notification = ModelReroutedNotification {
-                thread_id: conversation_id.to_string(),
-                turn_id: event_turn_id.clone(),
-                from_model: event.from_model,
-                to_model: event.to_model,
-                reason: event.reason.into(),
-            };
-            outgoing
-                .send_server_notification(ServerNotification::ModelRerouted(notification))
-                .await;
+            if let ApiVersion::V2 = api_version {
+                let notification = ModelReroutedNotification {
+                    thread_id: conversation_id.to_string(),
+                    turn_id: event_turn_id.clone(),
+                    from_model: event.from_model,
+                    to_model: event.to_model,
+                    reason: event.reason.into(),
+                };
+                outgoing
+                    .send_server_notification(ServerNotification::ModelRerouted(notification))
+                    .await;
+            }
         }
         EventMsg::ModelVerification(event) => {
-            let notification = ModelVerificationNotification {
-                thread_id: conversation_id.to_string(),
-                turn_id: event_turn_id.clone(),
-                verifications: event.verifications.into_iter().map(Into::into).collect(),
-            };
-            outgoing
-                .send_server_notification(ServerNotification::ModelVerification(notification))
-                .await;
+            if let ApiVersion::V2 = api_version {
+                let notification = ModelVerificationNotification {
+                    thread_id: conversation_id.to_string(),
+                    turn_id: event_turn_id.clone(),
+                    verifications: event.verifications.into_iter().map(Into::into).collect(),
+                };
+                outgoing
+                    .send_server_notification(ServerNotification::ModelVerification(notification))
+                    .await;
+            }
         }
         EventMsg::RealtimeConversationStarted(event) => {
-            let notification = ThreadRealtimeStartedNotification {
-                thread_id: conversation_id.to_string(),
-                session_id: event.session_id,
-                version: event.version,
-            };
-            outgoing
-                .send_server_notification(ServerNotification::ThreadRealtimeStarted(notification))
-                .await;
+            if let ApiVersion::V2 = api_version {
+                let notification = ThreadRealtimeStartedNotification {
+                    thread_id: conversation_id.to_string(),
+                    session_id: event.session_id,
+                    version: event.version,
+                };
+                outgoing
+                    .send_server_notification(ServerNotification::ThreadRealtimeStarted(
+                        notification,
+                    ))
+                    .await;
+            }
         }
         EventMsg::RealtimeConversationSdp(event) => {
-            let notification = ThreadRealtimeSdpNotification {
-                thread_id: conversation_id.to_string(),
-                sdp: event.sdp,
-            };
-            outgoing
-                .send_server_notification(ServerNotification::ThreadRealtimeSdp(notification))
-                .await;
+            if let ApiVersion::V2 = api_version {
+                let notification = ThreadRealtimeSdpNotification {
+                    thread_id: conversation_id.to_string(),
+                    sdp: event.sdp,
+                };
+                outgoing
+                    .send_server_notification(ServerNotification::ThreadRealtimeSdp(notification))
+                    .await;
+            }
         }
-        EventMsg::RealtimeConversationRealtime(event) => match event.payload {
-            RealtimeEvent::SessionUpdated { .. } => {}
-            RealtimeEvent::InputAudioSpeechStarted(event) => {
-                let notification = ThreadRealtimeItemAddedNotification {
-                    thread_id: conversation_id.to_string(),
-                    item: serde_json::json!({
-                        "type": "input_audio_buffer.speech_started",
-                        "item_id": event.item_id,
-                    }),
-                };
-                outgoing
-                    .send_server_notification(ServerNotification::ThreadRealtimeItemAdded(
-                        notification,
-                    ))
-                    .await;
+        EventMsg::RealtimeConversationRealtime(event) => {
+            if let ApiVersion::V2 = api_version {
+                match event.payload {
+                    RealtimeEvent::SessionUpdated { .. } => {}
+                    RealtimeEvent::InputAudioSpeechStarted(event) => {
+                        let notification = ThreadRealtimeItemAddedNotification {
+                            thread_id: conversation_id.to_string(),
+                            item: serde_json::json!({
+                                "type": "input_audio_buffer.speech_started",
+                                "item_id": event.item_id,
+                            }),
+                        };
+                        outgoing
+                            .send_server_notification(ServerNotification::ThreadRealtimeItemAdded(
+                                notification,
+                            ))
+                            .await;
+                    }
+                    RealtimeEvent::InputTranscriptDelta(event) => {
+                        let notification = ThreadRealtimeTranscriptDeltaNotification {
+                            thread_id: conversation_id.to_string(),
+                            role: "user".to_string(),
+                            delta: event.delta,
+                        };
+                        outgoing
+                            .send_server_notification(
+                                ServerNotification::ThreadRealtimeTranscriptDelta(notification),
+                            )
+                            .await;
+                    }
+                    RealtimeEvent::InputTranscriptDone(event) => {
+                        let notification = ThreadRealtimeTranscriptDoneNotification {
+                            thread_id: conversation_id.to_string(),
+                            role: "user".to_string(),
+                            text: event.text,
+                        };
+                        outgoing
+                            .send_server_notification(
+                                ServerNotification::ThreadRealtimeTranscriptDone(notification),
+                            )
+                            .await;
+                    }
+                    RealtimeEvent::OutputTranscriptDelta(event) => {
+                        let notification = ThreadRealtimeTranscriptDeltaNotification {
+                            thread_id: conversation_id.to_string(),
+                            role: "assistant".to_string(),
+                            delta: event.delta,
+                        };
+                        outgoing
+                            .send_server_notification(
+                                ServerNotification::ThreadRealtimeTranscriptDelta(notification),
+                            )
+                            .await;
+                    }
+                    RealtimeEvent::OutputTranscriptDone(event) => {
+                        let notification = ThreadRealtimeTranscriptDoneNotification {
+                            thread_id: conversation_id.to_string(),
+                            role: "assistant".to_string(),
+                            text: event.text,
+                        };
+                        outgoing
+                            .send_server_notification(
+                                ServerNotification::ThreadRealtimeTranscriptDone(notification),
+                            )
+                            .await;
+                    }
+                    RealtimeEvent::AudioOut(audio) => {
+                        let notification = ThreadRealtimeOutputAudioDeltaNotification {
+                            thread_id: conversation_id.to_string(),
+                            audio: audio.into(),
+                        };
+                        outgoing
+                            .send_server_notification(
+                                ServerNotification::ThreadRealtimeOutputAudioDelta(notification),
+                            )
+                            .await;
+                    }
+                    RealtimeEvent::ResponseCreated(_) => {}
+                    RealtimeEvent::ResponseCancelled(event) => {
+                        let notification = ThreadRealtimeItemAddedNotification {
+                            thread_id: conversation_id.to_string(),
+                            item: serde_json::json!({
+                                "type": "response.cancelled",
+                                "response_id": event.response_id,
+                            }),
+                        };
+                        outgoing
+                            .send_server_notification(ServerNotification::ThreadRealtimeItemAdded(
+                                notification,
+                            ))
+                            .await;
+                    }
+                    RealtimeEvent::ResponseDone(_) => {}
+                    RealtimeEvent::ConversationItemAdded(item) => {
+                        let notification = ThreadRealtimeItemAddedNotification {
+                            thread_id: conversation_id.to_string(),
+                            item,
+                        };
+                        outgoing
+                            .send_server_notification(ServerNotification::ThreadRealtimeItemAdded(
+                                notification,
+                            ))
+                            .await;
+                    }
+                    RealtimeEvent::ConversationItemDone { .. }
+                    | RealtimeEvent::NoopRequested(_) => {}
+                    RealtimeEvent::HandoffRequested(handoff) => {
+                        let notification = ThreadRealtimeItemAddedNotification {
+                            thread_id: conversation_id.to_string(),
+                            item: serde_json::json!({
+                                "type": "handoff_request",
+                                "handoff_id": handoff.handoff_id,
+                                "item_id": handoff.item_id,
+                                "input_transcript": handoff.input_transcript,
+                                "active_transcript": handoff.active_transcript,
+                            }),
+                        };
+                        outgoing
+                            .send_server_notification(ServerNotification::ThreadRealtimeItemAdded(
+                                notification,
+                            ))
+                            .await;
+                    }
+                    RealtimeEvent::Error(message) => {
+                        let notification = ThreadRealtimeErrorNotification {
+                            thread_id: conversation_id.to_string(),
+                            message,
+                        };
+                        outgoing
+                            .send_server_notification(ServerNotification::ThreadRealtimeError(
+                                notification,
+                            ))
+                            .await;
+                    }
+                }
             }
-            RealtimeEvent::InputTranscriptDelta(event) => {
-                let notification = ThreadRealtimeTranscriptDeltaNotification {
-                    thread_id: conversation_id.to_string(),
-                    role: "user".to_string(),
-                    delta: event.delta,
-                };
-                outgoing
-                    .send_server_notification(ServerNotification::ThreadRealtimeTranscriptDelta(
-                        notification,
-                    ))
-                    .await;
-            }
-            RealtimeEvent::InputTranscriptDone(event) => {
-                let notification = ThreadRealtimeTranscriptDoneNotification {
-                    thread_id: conversation_id.to_string(),
-                    role: "user".to_string(),
-                    text: event.text,
-                };
-                outgoing
-                    .send_server_notification(ServerNotification::ThreadRealtimeTranscriptDone(
-                        notification,
-                    ))
-                    .await;
-            }
-            RealtimeEvent::OutputTranscriptDelta(event) => {
-                let notification = ThreadRealtimeTranscriptDeltaNotification {
-                    thread_id: conversation_id.to_string(),
-                    role: "assistant".to_string(),
-                    delta: event.delta,
-                };
-                outgoing
-                    .send_server_notification(ServerNotification::ThreadRealtimeTranscriptDelta(
-                        notification,
-                    ))
-                    .await;
-            }
-            RealtimeEvent::OutputTranscriptDone(event) => {
-                let notification = ThreadRealtimeTranscriptDoneNotification {
-                    thread_id: conversation_id.to_string(),
-                    role: "assistant".to_string(),
-                    text: event.text,
-                };
-                outgoing
-                    .send_server_notification(ServerNotification::ThreadRealtimeTranscriptDone(
-                        notification,
-                    ))
-                    .await;
-            }
-            RealtimeEvent::AudioOut(audio) => {
-                let notification = ThreadRealtimeOutputAudioDeltaNotification {
-                    thread_id: conversation_id.to_string(),
-                    audio: audio.into(),
-                };
-                outgoing
-                    .send_server_notification(ServerNotification::ThreadRealtimeOutputAudioDelta(
-                        notification,
-                    ))
-                    .await;
-            }
-            RealtimeEvent::ResponseCreated(_) => {}
-            RealtimeEvent::ResponseCancelled(event) => {
-                let notification = ThreadRealtimeItemAddedNotification {
-                    thread_id: conversation_id.to_string(),
-                    item: serde_json::json!({
-                        "type": "response.cancelled",
-                        "response_id": event.response_id,
-                    }),
-                };
-                outgoing
-                    .send_server_notification(ServerNotification::ThreadRealtimeItemAdded(
-                        notification,
-                    ))
-                    .await;
-            }
-            RealtimeEvent::ResponseDone(_) => {}
-            RealtimeEvent::ConversationItemAdded(item) => {
-                let notification = ThreadRealtimeItemAddedNotification {
-                    thread_id: conversation_id.to_string(),
-                    item,
-                };
-                outgoing
-                    .send_server_notification(ServerNotification::ThreadRealtimeItemAdded(
-                        notification,
-                    ))
-                    .await;
-            }
-            RealtimeEvent::ConversationItemDone { .. } | RealtimeEvent::NoopRequested(_) => {}
-            RealtimeEvent::HandoffRequested(handoff) => {
-                let notification = ThreadRealtimeItemAddedNotification {
-                    thread_id: conversation_id.to_string(),
-                    item: serde_json::json!({
-                        "type": "handoff_request",
-                        "handoff_id": handoff.handoff_id,
-                        "item_id": handoff.item_id,
-                        "input_transcript": handoff.input_transcript,
-                        "active_transcript": handoff.active_transcript,
-                    }),
-                };
-                outgoing
-                    .send_server_notification(ServerNotification::ThreadRealtimeItemAdded(
-                        notification,
-                    ))
-                    .await;
-            }
-            RealtimeEvent::Error(message) => {
-                let notification = ThreadRealtimeErrorNotification {
-                    thread_id: conversation_id.to_string(),
-                    message,
-                };
-                outgoing
-                    .send_server_notification(ServerNotification::ThreadRealtimeError(notification))
-                    .await;
-            }
-        },
+        }
         EventMsg::RealtimeConversationClosed(event) => {
-            let notification = ThreadRealtimeClosedNotification {
-                thread_id: conversation_id.to_string(),
-                reason: event.reason,
-            };
-            outgoing
-                .send_server_notification(ServerNotification::ThreadRealtimeClosed(notification))
-                .await;
+            if let ApiVersion::V2 = api_version {
+                let notification = ThreadRealtimeClosedNotification {
+                    thread_id: conversation_id.to_string(),
+                    reason: event.reason,
+                };
+                outgoing
+                    .send_server_notification(ServerNotification::ThreadRealtimeClosed(
+                        notification,
+                    ))
+                    .await;
+            }
         }
         EventMsg::ApplyPatchApprovalRequest(event) => {
             let permission_guard = thread_watch_manager
                 .note_permission_requested(&conversation_id.to_string())
                 .await;
-            // Until we migrate the core to be aware of a first class FileChangeItem
-            // and emit the corresponding EventMsg, we repurpose the call_id as the item_id.
-            let item_id = event.call_id.clone();
-            let patch_changes = convert_patch_changes(&event.changes);
-            let first_start = {
-                let mut state = thread_state.lock().await;
-                state
-                    .turn_summary
-                    .file_change_started
-                    .insert(item_id.clone())
-            };
-            if first_start {
-                let item = build_file_change_approval_request_item(&event);
-                let notification = ItemStartedNotification {
-                    thread_id: conversation_id.to_string(),
-                    turn_id: event_turn_id.clone(),
-                    item,
-                };
-                outgoing
-                    .send_server_notification(ServerNotification::ItemStarted(notification))
-                    .await;
-            }
+            match api_version {
+                ApiVersion::V1 => {
+                    let params = ApplyPatchApprovalParams {
+                        conversation_id,
+                        call_id: event.call_id.clone(),
+                        file_changes: event.changes.clone(),
+                        reason: event.reason.clone(),
+                        grant_root: event.grant_root.clone(),
+                    };
+                    let (_pending_request_id, rx) = outgoing
+                        .send_request(ServerRequestPayload::ApplyPatchApproval(params))
+                        .await;
+                    let call_id = event.call_id.clone();
+                    tokio::spawn(async move {
+                        let _permission_guard = permission_guard;
+                        on_patch_approval_response(call_id, rx, conversation).await;
+                    });
+                }
+                ApiVersion::V2 => {
+                    // Until we migrate the core to be aware of a first class FileChangeItem
+                    // and emit the corresponding EventMsg, we repurpose the call_id as the item_id.
+                    let item_id = event.call_id.clone();
+                    let patch_changes = convert_patch_changes(&event.changes);
+                    let first_start = {
+                        let mut state = thread_state.lock().await;
+                        state
+                            .turn_summary
+                            .file_change_started
+                            .insert(item_id.clone())
+                    };
+                    if first_start {
+                        let item = build_file_change_approval_request_item(&event);
+                        let notification = ItemStartedNotification {
+                            thread_id: conversation_id.to_string(),
+                            turn_id: event_turn_id.clone(),
+                            item,
+                        };
+                        outgoing
+                            .send_server_notification(ServerNotification::ItemStarted(notification))
+                            .await;
+                    }
 
-            let params = FileChangeRequestApprovalParams {
-                thread_id: conversation_id.to_string(),
-                turn_id: event.turn_id.clone(),
-                item_id: item_id.clone(),
-                reason: event.reason.clone(),
-                grant_root: event.grant_root.clone(),
-            };
-            let (pending_request_id, rx) = outgoing
-                .send_request(ServerRequestPayload::FileChangeRequestApproval(params))
-                .await;
-            tokio::spawn(async move {
-                on_file_change_request_approval_response(
-                    event_turn_id,
-                    conversation_id,
-                    item_id,
-                    patch_changes,
-                    pending_request_id,
-                    rx,
-                    conversation,
-                    outgoing,
-                    thread_state.clone(),
-                    permission_guard,
-                )
-                .await;
-            });
+                    let params = FileChangeRequestApprovalParams {
+                        thread_id: conversation_id.to_string(),
+                        turn_id: event.turn_id.clone(),
+                        item_id: item_id.clone(),
+                        reason: event.reason.clone(),
+                        grant_root: event.grant_root.clone(),
+                    };
+                    let (pending_request_id, rx) = outgoing
+                        .send_request(ServerRequestPayload::FileChangeRequestApproval(params))
+                        .await;
+                    tokio::spawn(async move {
+                        on_file_change_request_approval_response(
+                            event_turn_id,
+                            conversation_id,
+                            item_id,
+                            patch_changes,
+                            pending_request_id,
+                            rx,
+                            conversation,
+                            outgoing,
+                            thread_state.clone(),
+                            permission_guard,
+                        )
+                        .await;
+                    });
+                }
+            }
         }
         EventMsg::ExecApprovalRequest(ev) => {
             let permission_guard = thread_watch_manager
                 .note_permission_requested(&conversation_id.to_string())
                 .await;
+            let approval_id_for_op = ev.effective_approval_id();
             let available_decisions = ev
                 .effective_available_decisions()
                 .into_iter()
@@ -618,314 +685,406 @@ pub(crate) async fn apply_bespoke_event_handling(
                 parsed_cmd,
                 ..
             } = ev;
-            let command_actions = parsed_cmd
-                .iter()
-                .cloned()
-                .map(|parsed| V2ParsedCommand::from_core_with_cwd(parsed, &cwd))
-                .collect::<Vec<_>>();
-            let presentation = if let Some(network_approval_context) =
-                network_approval_context.map(V2NetworkApprovalContext::from)
-            {
-                CommandExecutionApprovalPresentation::Network(network_approval_context)
-            } else {
-                let command_string = shlex_join(&command);
-                let completion_item = CommandExecutionCompletionItem {
-                    command: command_string,
-                    cwd: cwd.clone(),
-                    command_actions: command_actions.clone(),
-                };
-                CommandExecutionApprovalPresentation::Command(completion_item)
-            };
-            let (network_approval_context, command, cwd, command_actions, completion_item) =
-                match presentation {
-                    CommandExecutionApprovalPresentation::Network(network_approval_context) => {
-                        (Some(network_approval_context), None, None, None, None)
+            match api_version {
+                ApiVersion::V1 => {
+                    let params = ExecCommandApprovalParams {
+                        conversation_id,
+                        call_id: call_id.clone(),
+                        approval_id,
+                        command,
+                        cwd: cwd.to_path_buf(),
+                        reason,
+                        parsed_cmd,
+                    };
+                    let (_pending_request_id, rx) = outgoing
+                        .send_request(ServerRequestPayload::ExecCommandApproval(params))
+                        .await;
+                    tokio::spawn(async move {
+                        let _permission_guard = permission_guard;
+                        on_exec_approval_response(
+                            approval_id_for_op,
+                            event_turn_id,
+                            rx,
+                            conversation,
+                        )
+                        .await;
+                    });
+                }
+                ApiVersion::V2 => {
+                    let command_actions = parsed_cmd
+                        .iter()
+                        .cloned()
+                        .map(|parsed| V2ParsedCommand::from_core_with_cwd(parsed, &cwd))
+                        .collect::<Vec<_>>();
+                    let presentation = if let Some(network_approval_context) =
+                        network_approval_context.map(V2NetworkApprovalContext::from)
+                    {
+                        CommandExecutionApprovalPresentation::Network(network_approval_context)
+                    } else {
+                        let command_string = shlex_join(&command);
+                        let completion_item = CommandExecutionCompletionItem {
+                            command: command_string,
+                            cwd: cwd.clone(),
+                            command_actions: command_actions.clone(),
+                        };
+                        CommandExecutionApprovalPresentation::Command(completion_item)
+                    };
+                    let (network_approval_context, command, cwd, command_actions, completion_item) =
+                        match presentation {
+                            CommandExecutionApprovalPresentation::Network(
+                                network_approval_context,
+                            ) => (Some(network_approval_context), None, None, None, None),
+                            CommandExecutionApprovalPresentation::Command(completion_item) => (
+                                None,
+                                Some(completion_item.command.clone()),
+                                Some(completion_item.cwd.clone()),
+                                Some(completion_item.command_actions.clone()),
+                                Some(completion_item),
+                            ),
+                        };
+                    if approval_id.is_none()
+                        && let Some(completion_item) = completion_item.as_ref()
+                    {
+                        start_command_execution_item(
+                            &conversation_id,
+                            event_turn_id.clone(),
+                            call_id.clone(),
+                            completion_item.command.clone(),
+                            completion_item.cwd.clone(),
+                            completion_item.command_actions.clone(),
+                            CommandExecutionSource::Agent,
+                            &outgoing,
+                            &thread_state,
+                        )
+                        .await;
                     }
-                    CommandExecutionApprovalPresentation::Command(completion_item) => (
-                        None,
-                        Some(completion_item.command.clone()),
-                        Some(completion_item.cwd.clone()),
-                        Some(completion_item.command_actions.clone()),
-                        Some(completion_item),
-                    ),
-                };
-            if approval_id.is_none()
-                && let Some(completion_item) = completion_item.as_ref()
-            {
-                start_command_execution_item(
-                    &conversation_id,
-                    event_turn_id.clone(),
-                    call_id.clone(),
-                    completion_item.command.clone(),
-                    completion_item.cwd.clone(),
-                    completion_item.command_actions.clone(),
-                    CommandExecutionSource::Agent,
-                    &outgoing,
-                    &thread_state,
-                )
-                .await;
-            }
-            let proposed_execpolicy_amendment_v2 =
-                proposed_execpolicy_amendment.map(V2ExecPolicyAmendment::from);
-            let proposed_network_policy_amendments_v2 =
-                proposed_network_policy_amendments.map(|amendments| {
-                    amendments
-                        .into_iter()
-                        .map(V2NetworkPolicyAmendment::from)
-                        .collect()
-                });
-            let additional_permissions =
-                additional_permissions.map(V2AdditionalPermissionProfile::from);
+                    let proposed_execpolicy_amendment_v2 =
+                        proposed_execpolicy_amendment.map(V2ExecPolicyAmendment::from);
+                    let proposed_network_policy_amendments_v2 = proposed_network_policy_amendments
+                        .map(|amendments| {
+                            amendments
+                                .into_iter()
+                                .map(V2NetworkPolicyAmendment::from)
+                                .collect()
+                        });
+                    let additional_permissions =
+                        additional_permissions.map(V2AdditionalPermissionProfile::from);
 
-            let params = CommandExecutionRequestApprovalParams {
-                thread_id: conversation_id.to_string(),
-                turn_id: turn_id.clone(),
-                item_id: call_id.clone(),
-                approval_id: approval_id.clone(),
-                reason,
-                network_approval_context,
-                command,
-                cwd,
-                command_actions,
-                additional_permissions,
-                proposed_execpolicy_amendment: proposed_execpolicy_amendment_v2,
-                proposed_network_policy_amendments: proposed_network_policy_amendments_v2,
-                available_decisions: Some(available_decisions),
-            };
-            let (pending_request_id, rx) = outgoing
-                .send_request(ServerRequestPayload::CommandExecutionRequestApproval(
-                    params,
-                ))
-                .await;
-            tokio::spawn(async move {
-                on_command_execution_request_approval_response(
-                    event_turn_id,
-                    conversation_id,
-                    approval_id,
-                    call_id,
-                    completion_item,
-                    pending_request_id,
-                    rx,
-                    conversation,
-                    outgoing,
-                    thread_state.clone(),
-                    permission_guard,
-                )
-                .await;
-            });
+                    let params = CommandExecutionRequestApprovalParams {
+                        thread_id: conversation_id.to_string(),
+                        turn_id: turn_id.clone(),
+                        item_id: call_id.clone(),
+                        approval_id: approval_id.clone(),
+                        reason,
+                        network_approval_context,
+                        command,
+                        cwd,
+                        command_actions,
+                        additional_permissions,
+                        proposed_execpolicy_amendment: proposed_execpolicy_amendment_v2,
+                        proposed_network_policy_amendments: proposed_network_policy_amendments_v2,
+                        available_decisions: Some(available_decisions),
+                    };
+                    let (pending_request_id, rx) = outgoing
+                        .send_request(ServerRequestPayload::CommandExecutionRequestApproval(
+                            params,
+                        ))
+                        .await;
+                    tokio::spawn(async move {
+                        on_command_execution_request_approval_response(
+                            event_turn_id,
+                            conversation_id,
+                            approval_id,
+                            call_id,
+                            completion_item,
+                            pending_request_id,
+                            rx,
+                            conversation,
+                            outgoing,
+                            thread_state.clone(),
+                            permission_guard,
+                        )
+                        .await;
+                    });
+                }
+            }
         }
         EventMsg::RequestUserInput(request) => {
-            let user_input_guard = thread_watch_manager
-                .note_user_input_requested(&conversation_id.to_string())
-                .await;
-            let questions = request
-                .questions
-                .into_iter()
-                .map(|question| ToolRequestUserInputQuestion {
-                    id: question.id,
-                    header: question.header,
-                    question: question.question,
-                    is_other: question.is_other,
-                    is_secret: question.is_secret,
-                    options: question.options.map(|options| {
-                        options
-                            .into_iter()
-                            .map(|option| ToolRequestUserInputOption {
-                                label: option.label,
-                                description: option.description,
-                            })
-                            .collect()
-                    }),
-                })
-                .collect();
-            let params = ToolRequestUserInputParams {
-                thread_id: conversation_id.to_string(),
-                turn_id: request.turn_id,
-                item_id: request.call_id,
-                questions,
-            };
-            let (pending_request_id, rx) = outgoing
-                .send_request(ServerRequestPayload::ToolRequestUserInput(params))
-                .await;
-            tokio::spawn(async move {
-                on_request_user_input_response(
-                    event_turn_id,
-                    pending_request_id,
-                    rx,
-                    conversation,
-                    thread_state,
-                    user_input_guard,
-                )
-                .await;
-            });
+            if matches!(api_version, ApiVersion::V2) {
+                let user_input_guard = thread_watch_manager
+                    .note_user_input_requested(&conversation_id.to_string())
+                    .await;
+                let questions = request
+                    .questions
+                    .into_iter()
+                    .map(|question| ToolRequestUserInputQuestion {
+                        id: question.id,
+                        header: question.header,
+                        question: question.question,
+                        is_other: question.is_other,
+                        is_secret: question.is_secret,
+                        options: question.options.map(|options| {
+                            options
+                                .into_iter()
+                                .map(|option| ToolRequestUserInputOption {
+                                    label: option.label,
+                                    description: option.description,
+                                })
+                                .collect()
+                        }),
+                    })
+                    .collect();
+                let params = ToolRequestUserInputParams {
+                    thread_id: conversation_id.to_string(),
+                    turn_id: request.turn_id,
+                    item_id: request.call_id,
+                    questions,
+                };
+                let (pending_request_id, rx) = outgoing
+                    .send_request(ServerRequestPayload::ToolRequestUserInput(params))
+                    .await;
+                tokio::spawn(async move {
+                    on_request_user_input_response(
+                        event_turn_id,
+                        pending_request_id,
+                        rx,
+                        conversation,
+                        thread_state,
+                        user_input_guard,
+                    )
+                    .await;
+                });
+            } else {
+                error!(
+                    "request_user_input is only supported on api v2 (call_id: {})",
+                    request.call_id
+                );
+                let empty = CoreRequestUserInputResponse {
+                    answers: HashMap::new(),
+                };
+                if let Err(err) = conversation
+                    .submit(Op::UserInputAnswer {
+                        id: event_turn_id,
+                        response: empty,
+                    })
+                    .await
+                {
+                    error!("failed to submit UserInputAnswer: {err}");
+                }
+            }
         }
         EventMsg::ElicitationRequest(request) => {
-            let permission_guard = thread_watch_manager
-                .note_permission_requested(&conversation_id.to_string())
-                .await;
-            let turn_id = match request.turn_id.clone() {
-                Some(turn_id) => Some(turn_id),
-                None => {
-                    let state = thread_state.lock().await;
-                    state.active_turn_snapshot().map(|turn| turn.id)
-                }
-            };
-            let server_name = request.server_name.clone();
-            let request_body = match request.request.try_into() {
-                Ok(request_body) => request_body,
-                Err(err) => {
-                    error!(
-                        error = %err,
-                        server_name,
-                        request_id = ?request.id,
-                        "failed to parse typed MCP elicitation schema"
-                    );
-                    if let Err(err) = conversation
-                        .submit(Op::ResolveElicitation {
-                            server_name: request.server_name,
-                            request_id: request.id,
-                            decision: codex_protocol::approvals::ElicitationAction::Cancel,
-                            content: None,
-                            meta: None,
-                        })
-                        .await
-                    {
-                        error!("failed to submit ResolveElicitation: {err}");
+            if matches!(api_version, ApiVersion::V2) {
+                let permission_guard = thread_watch_manager
+                    .note_permission_requested(&conversation_id.to_string())
+                    .await;
+                let turn_id = match request.turn_id.clone() {
+                    Some(turn_id) => Some(turn_id),
+                    None => {
+                        let state = thread_state.lock().await;
+                        state.active_turn_snapshot().map(|turn| turn.id)
                     }
-                    return;
-                }
-            };
-            let params = McpServerElicitationRequestParams {
-                thread_id: conversation_id.to_string(),
-                turn_id,
-                server_name: request.server_name.clone(),
-                request: request_body,
-            };
-            let (pending_request_id, rx) = outgoing
-                .send_request(ServerRequestPayload::McpServerElicitationRequest(params))
-                .await;
-            tokio::spawn(async move {
-                on_mcp_server_elicitation_response(
-                    request.server_name,
-                    request.id,
-                    pending_request_id,
-                    rx,
-                    conversation,
-                    thread_state,
-                    permission_guard,
-                )
-                .await;
-            });
+                };
+                let server_name = request.server_name.clone();
+                let request_body = match request.request.try_into() {
+                    Ok(request_body) => request_body,
+                    Err(err) => {
+                        error!(
+                            error = %err,
+                            server_name,
+                            request_id = ?request.id,
+                            "failed to parse typed MCP elicitation schema"
+                        );
+                        if let Err(err) = conversation
+                            .submit(Op::ResolveElicitation {
+                                server_name: request.server_name,
+                                request_id: request.id,
+                                decision: codex_protocol::approvals::ElicitationAction::Cancel,
+                                content: None,
+                                meta: None,
+                            })
+                            .await
+                        {
+                            error!("failed to submit ResolveElicitation: {err}");
+                        }
+                        return;
+                    }
+                };
+                let params = McpServerElicitationRequestParams {
+                    thread_id: conversation_id.to_string(),
+                    turn_id,
+                    server_name: request.server_name.clone(),
+                    request: request_body,
+                };
+                let (pending_request_id, rx) = outgoing
+                    .send_request(ServerRequestPayload::McpServerElicitationRequest(params))
+                    .await;
+                tokio::spawn(async move {
+                    on_mcp_server_elicitation_response(
+                        request.server_name,
+                        request.id,
+                        pending_request_id,
+                        rx,
+                        conversation,
+                        thread_state,
+                        permission_guard,
+                    )
+                    .await;
+                });
+            }
         }
         EventMsg::RequestPermissions(request) => {
-            let permission_guard = thread_watch_manager
-                .note_permission_requested(&conversation_id.to_string())
-                .await;
-            let requested_permissions = request.permissions.clone();
-            let request_cwd = match request.cwd.clone() {
-                Some(cwd) => cwd,
-                None => conversation.config_snapshot().await.cwd,
-            };
-            let params = PermissionsRequestApprovalParams {
-                thread_id: conversation_id.to_string(),
-                turn_id: request.turn_id.clone(),
-                item_id: request.call_id.clone(),
-                cwd: request_cwd.clone(),
-                reason: request.reason,
-                permissions: request.permissions.into(),
-            };
-            let (pending_request_id, rx) = outgoing
-                .send_request(ServerRequestPayload::PermissionsRequestApproval(params))
-                .await;
-            let pending_response = PendingRequestPermissionsResponse {
-                call_id: request.call_id,
-                requested_permissions,
-                request_cwd,
-                pending_request_id,
-                receiver: rx,
-                request_permissions_guard: permission_guard,
-            };
-            tokio::spawn(async move {
-                on_request_permissions_response(pending_response, conversation, thread_state).await;
-            });
+            if matches!(api_version, ApiVersion::V2) {
+                let permission_guard = thread_watch_manager
+                    .note_permission_requested(&conversation_id.to_string())
+                    .await;
+                let requested_permissions = request.permissions.clone();
+                let request_cwd = match request.cwd.clone() {
+                    Some(cwd) => cwd,
+                    None => conversation.config_snapshot().await.cwd,
+                };
+                let params = PermissionsRequestApprovalParams {
+                    thread_id: conversation_id.to_string(),
+                    turn_id: request.turn_id.clone(),
+                    item_id: request.call_id.clone(),
+                    cwd: request_cwd.clone(),
+                    reason: request.reason,
+                    permissions: request.permissions.into(),
+                };
+                let (pending_request_id, rx) = outgoing
+                    .send_request(ServerRequestPayload::PermissionsRequestApproval(params))
+                    .await;
+                let pending_response = PendingRequestPermissionsResponse {
+                    call_id: request.call_id,
+                    requested_permissions,
+                    request_cwd,
+                    pending_request_id,
+                    receiver: rx,
+                    request_permissions_guard: permission_guard,
+                };
+                tokio::spawn(async move {
+                    on_request_permissions_response(pending_response, conversation, thread_state)
+                        .await;
+                });
+            } else {
+                error!(
+                    "request_permissions is only supported on api v2 (call_id: {})",
+                    request.call_id
+                );
+                let empty = CoreRequestPermissionsResponse {
+                    permissions: Default::default(),
+                    scope: CorePermissionGrantScope::Turn,
+                    strict_auto_review: false,
+                };
+                if let Err(err) = conversation
+                    .submit(Op::RequestPermissionsResponse {
+                        id: request.call_id,
+                        response: empty,
+                    })
+                    .await
+                {
+                    error!("failed to submit RequestPermissionsResponse: {err}");
+                }
+            }
         }
         EventMsg::DynamicToolCallRequest(request) => {
-            let call_id = request.call_id;
-            let turn_id = request.turn_id;
-            let namespace = request.namespace;
-            let tool = request.tool;
-            let arguments = request.arguments;
-            let item = ThreadItem::DynamicToolCall {
-                id: call_id.clone(),
-                namespace: namespace.clone(),
-                tool: tool.clone(),
-                arguments: arguments.clone(),
-                status: DynamicToolCallStatus::InProgress,
-                content_items: None,
-                success: None,
-                duration_ms: None,
-            };
-            let notification = ItemStartedNotification {
-                thread_id: conversation_id.to_string(),
-                turn_id: turn_id.clone(),
-                item,
-            };
-            outgoing
-                .send_server_notification(ServerNotification::ItemStarted(notification))
-                .await;
-            let params = DynamicToolCallParams {
-                thread_id: conversation_id.to_string(),
-                turn_id: turn_id.clone(),
-                call_id: call_id.clone(),
-                namespace,
-                tool: tool.clone(),
-                arguments: arguments.clone(),
-            };
-            let (_pending_request_id, rx) = outgoing
-                .send_request(ServerRequestPayload::DynamicToolCall(params))
-                .await;
-            tokio::spawn(async move {
-                crate::dynamic_tools::on_call_response(call_id, rx, conversation).await;
-            });
+            if matches!(api_version, ApiVersion::V2) {
+                let call_id = request.call_id;
+                let turn_id = request.turn_id;
+                let namespace = request.namespace;
+                let tool = request.tool;
+                let arguments = request.arguments;
+                let item = ThreadItem::DynamicToolCall {
+                    id: call_id.clone(),
+                    namespace: namespace.clone(),
+                    tool: tool.clone(),
+                    arguments: arguments.clone(),
+                    status: DynamicToolCallStatus::InProgress,
+                    content_items: None,
+                    success: None,
+                    duration_ms: None,
+                };
+                let notification = ItemStartedNotification {
+                    thread_id: conversation_id.to_string(),
+                    turn_id: turn_id.clone(),
+                    item,
+                };
+                outgoing
+                    .send_server_notification(ServerNotification::ItemStarted(notification))
+                    .await;
+                let params = DynamicToolCallParams {
+                    thread_id: conversation_id.to_string(),
+                    turn_id: turn_id.clone(),
+                    call_id: call_id.clone(),
+                    namespace,
+                    tool: tool.clone(),
+                    arguments: arguments.clone(),
+                };
+                let (_pending_request_id, rx) = outgoing
+                    .send_request(ServerRequestPayload::DynamicToolCall(params))
+                    .await;
+                tokio::spawn(async move {
+                    crate::dynamic_tools::on_call_response(call_id, rx, conversation).await;
+                });
+            } else {
+                error!(
+                    "dynamic tool calls are only supported on api v2 (call_id: {})",
+                    request.call_id
+                );
+                let call_id = request.call_id;
+                let _ = conversation
+                    .submit(Op::DynamicToolResponse {
+                        id: call_id.clone(),
+                        response: CoreDynamicToolResponse {
+                            content_items: vec![CoreDynamicToolCallOutputContentItem::InputText {
+                                text: "dynamic tool calls require api v2".to_string(),
+                            }],
+                            success: false,
+                        },
+                    })
+                    .await;
+            }
         }
         EventMsg::DynamicToolCallResponse(response) => {
-            let status = if response.success {
-                DynamicToolCallStatus::Completed
-            } else {
-                DynamicToolCallStatus::Failed
-            };
-            let duration_ms = i64::try_from(response.duration.as_millis()).ok();
-            let item = ThreadItem::DynamicToolCall {
-                id: response.call_id,
-                namespace: response.namespace,
-                tool: response.tool,
-                arguments: response.arguments,
-                status,
-                content_items: Some(
-                    response
-                        .content_items
-                        .into_iter()
-                        .map(|item| match item {
-                            CoreDynamicToolCallOutputContentItem::InputText { text } => {
-                                DynamicToolCallOutputContentItem::InputText { text }
-                            }
-                            CoreDynamicToolCallOutputContentItem::InputImage { image_url } => {
-                                DynamicToolCallOutputContentItem::InputImage { image_url }
-                            }
-                        })
-                        .collect(),
-                ),
-                success: Some(response.success),
-                duration_ms,
-            };
-            let notification = ItemCompletedNotification {
-                thread_id: conversation_id.to_string(),
-                turn_id: response.turn_id,
-                item,
-            };
-            outgoing
-                .send_server_notification(ServerNotification::ItemCompleted(notification))
-                .await;
+            if matches!(api_version, ApiVersion::V2) {
+                let status = if response.success {
+                    DynamicToolCallStatus::Completed
+                } else {
+                    DynamicToolCallStatus::Failed
+                };
+                let duration_ms = i64::try_from(response.duration.as_millis()).ok();
+                let item = ThreadItem::DynamicToolCall {
+                    id: response.call_id,
+                    namespace: response.namespace,
+                    tool: response.tool,
+                    arguments: response.arguments,
+                    status,
+                    content_items: Some(
+                        response
+                            .content_items
+                            .into_iter()
+                            .map(|item| match item {
+                                CoreDynamicToolCallOutputContentItem::InputText { text } => {
+                                    DynamicToolCallOutputContentItem::InputText { text }
+                                }
+                                CoreDynamicToolCallOutputContentItem::InputImage { image_url } => {
+                                    DynamicToolCallOutputContentItem::InputImage { image_url }
+                                }
+                            })
+                            .collect(),
+                    ),
+                    success: Some(response.success),
+                    duration_ms,
+                };
+                let notification = ItemCompletedNotification {
+                    thread_id: conversation_id.to_string(),
+                    turn_id: response.turn_id,
+                    item,
+                };
+                outgoing
+                    .send_server_notification(ServerNotification::ItemCompleted(notification))
+                    .await;
+            }
         }
         // TODO(celia): properly construct McpToolCall TurnItem in core.
         EventMsg::McpToolCallBegin(begin_event) => {
@@ -1236,6 +1395,16 @@ pub(crate) async fn apply_bespoke_event_handling(
         EventMsg::ContextCompacted(..) => {
             // Core still fans out this deprecated event for legacy clients;
             // v2 clients receive the canonical ContextCompaction item instead.
+            if matches!(api_version, ApiVersion::V2) {
+                return;
+            }
+            let notification = ContextCompactedNotification {
+                thread_id: conversation_id.to_string(),
+                turn_id: event_turn_id.clone(),
+            };
+            outgoing
+                .send_server_notification(ServerNotification::ContextCompacted(notification))
+                .await;
         }
         EventMsg::DeprecationNotice(event) => {
             let notification = DeprecationNoticeNotification {
@@ -1419,24 +1588,28 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::HookStarted(event) => {
-            let notification = HookStartedNotification {
-                thread_id: conversation_id.to_string(),
-                turn_id: event.turn_id,
-                run: event.run.into(),
-            };
-            outgoing
-                .send_server_notification(ServerNotification::HookStarted(notification))
-                .await;
+            if let ApiVersion::V2 = api_version {
+                let notification = HookStartedNotification {
+                    thread_id: conversation_id.to_string(),
+                    turn_id: event.turn_id,
+                    run: event.run.into(),
+                };
+                outgoing
+                    .send_server_notification(ServerNotification::HookStarted(notification))
+                    .await;
+            }
         }
         EventMsg::HookCompleted(event) => {
-            let notification = HookCompletedNotification {
-                thread_id: conversation_id.to_string(),
-                turn_id: event.turn_id,
-                run: event.run.into(),
-            };
-            outgoing
-                .send_server_notification(ServerNotification::HookCompleted(notification))
-                .await;
+            if let ApiVersion::V2 = api_version {
+                let notification = HookCompletedNotification {
+                    thread_id: conversation_id.to_string(),
+                    turn_id: event.turn_id,
+                    run: event.run.into(),
+                };
+                outgoing
+                    .send_server_notification(ServerNotification::HookCompleted(notification))
+                    .await;
+            }
         }
         EventMsg::ExitedReviewMode(review_event) => {
             let review = match review_event.review_output {
@@ -1466,6 +1639,7 @@ pub(crate) async fn apply_bespoke_event_handling(
         }
         EventMsg::RawResponseItem(raw_response_item_event) => {
             maybe_emit_hook_prompt_item_completed(
+                api_version,
                 conversation_id,
                 &event_turn_id,
                 &raw_response_item_event.item,
@@ -1473,6 +1647,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             )
             .await;
             maybe_emit_raw_response_item_completed(
+                api_version,
                 conversation_id,
                 &event_turn_id,
                 raw_response_item_event.item,
@@ -1530,10 +1705,12 @@ pub(crate) async fn apply_bespoke_event_handling(
             .await;
         }
         EventMsg::ExecCommandBegin(exec_command_begin_event) => {
-            if matches!(
-                exec_command_begin_event.source,
-                codex_protocol::protocol::ExecCommandSource::UnifiedExecInteraction
-            ) {
+            if matches!(api_version, ApiVersion::V2)
+                && matches!(
+                    exec_command_begin_event.source,
+                    codex_protocol::protocol::ExecCommandSource::UnifiedExecInteraction
+                )
+            {
                 // TerminalInteraction is the v2 surface for unified exec
                 // stdin/poll events. Suppress the legacy CommandExecution
                 // item so clients do not render the same wait twice.
@@ -1642,10 +1819,12 @@ pub(crate) async fn apply_bespoke_event_handling(
                     .command_execution_started
                     .remove(&call_id);
             }
-            if matches!(
-                exec_command_end_event.source,
-                codex_protocol::protocol::ExecCommandSource::UnifiedExecInteraction
-            ) {
+            if matches!(api_version, ApiVersion::V2)
+                && matches!(
+                    exec_command_end_event.source,
+                    codex_protocol::protocol::ExecCommandSource::UnifiedExecInteraction
+                )
+            {
                 // The paired begin event is suppressed above; keep the
                 // completion out of v2 as well so no orphan legacy item is
                 // emitted for unified exec interactions.
@@ -1667,7 +1846,26 @@ pub(crate) async fn apply_bespoke_event_handling(
         EventMsg::TurnAborted(turn_aborted_event) => {
             // All per-thread requests are bound to a turn, so abort them.
             outgoing.abort_pending_server_requests().await;
-            respond_to_pending_interrupts(&thread_state, &outgoing).await;
+            let pending = {
+                let mut state = thread_state.lock().await;
+                std::mem::take(&mut state.pending_interrupts)
+            };
+            if !pending.is_empty() {
+                for (rid, ver) in pending {
+                    match ver {
+                        ApiVersion::V1 => {
+                            let response = InterruptConversationResponse {
+                                abort_reason: turn_aborted_event.reason.clone(),
+                            };
+                            outgoing.send_response(rid, response).await;
+                        }
+                        ApiVersion::V2 => {
+                            let response = TurnInterruptResponse {};
+                            outgoing.send_response(rid, response).await;
+                        }
+                    }
+                }
+            }
 
             thread_watch_manager
                 .note_turn_interrupted(&conversation_id.to_string())
@@ -1689,27 +1887,13 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
 
             if let Some(request_id) = pending {
-                let _thread_list_state_permit = match thread_list_state_permit.acquire().await {
-                    Ok(permit) => permit,
-                    Err(err) => {
-                        outgoing
-                            .send_error(
-                                request_id,
-                                internal_error(format!(
-                                    "failed to acquire thread list state permit: {err}"
-                                )),
-                            )
-                            .await;
-                        return;
-                    }
-                };
                 let Some(rollout_path) = conversation.rollout_path() else {
-                    outgoing
-                        .send_error(
-                            request_id,
-                            invalid_request("thread has no persisted rollout"),
-                        )
-                        .await;
+                    let error = JSONRPCErrorError {
+                        code: INVALID_REQUEST_ERROR_CODE,
+                        message: "thread has no persisted rollout".to_string(),
+                        data: None,
+                    };
+                    outgoing.send_error(request_id, error).await;
                     return;
                 };
                 let response = match read_summary_from_rollout(
@@ -1740,29 +1924,29 @@ pub(crate) async fn apply_bespoke_event_handling(
                                 ThreadRollbackResponse { thread }
                             }
                             Err(err) => {
-                                outgoing
-                                    .send_error(
-                                        request_id.clone(),
-                                        internal_error(format!(
-                                            "failed to load rollout `{}`: {err}",
-                                            rollout_path.display()
-                                        )),
-                                    )
-                                    .await;
+                                let error = JSONRPCErrorError {
+                                    code: INTERNAL_ERROR_CODE,
+                                    message: format!(
+                                        "failed to load rollout `{}`: {err}",
+                                        rollout_path.display()
+                                    ),
+                                    data: None,
+                                };
+                                outgoing.send_error(request_id.clone(), error).await;
                                 return;
                             }
                         }
                     }
                     Err(err) => {
-                        outgoing
-                            .send_error(
-                                request_id.clone(),
-                                internal_error(format!(
-                                    "failed to load rollout `{}`: {err}",
-                                    rollout_path.display()
-                                )),
-                            )
-                            .await;
+                        let error = JSONRPCErrorError {
+                            code: INTERNAL_ERROR_CODE,
+                            message: format!(
+                                "failed to load rollout `{}`: {err}",
+                                rollout_path.display()
+                            ),
+                            data: None,
+                        };
+                        outgoing.send_error(request_id.clone(), error).await;
                         return;
                     }
                 };
@@ -1771,36 +1955,34 @@ pub(crate) async fn apply_bespoke_event_handling(
             }
         }
         EventMsg::ThreadNameUpdated(thread_name_event) => {
-            let notification = ThreadNameUpdatedNotification {
-                thread_id: thread_name_event.thread_id.to_string(),
-                thread_name: thread_name_event.thread_name,
-            };
-            outgoing
-                .send_global_server_notification(ServerNotification::ThreadNameUpdated(
-                    notification,
-                ))
-                .await;
-        }
-        EventMsg::ThreadGoalUpdated(thread_goal_event) => {
-            let notification = ThreadGoalUpdatedNotification {
-                thread_id: thread_goal_event.thread_id.to_string(),
-                turn_id: thread_goal_event.turn_id,
-                goal: thread_goal_event.goal.clone().into(),
-            };
-            outgoing
-                .send_global_server_notification(ServerNotification::ThreadGoalUpdated(
-                    notification,
-                ))
-                .await;
+            if let ApiVersion::V2 = api_version {
+                let notification = ThreadNameUpdatedNotification {
+                    thread_id: thread_name_event.thread_id.to_string(),
+                    thread_name: thread_name_event.thread_name,
+                };
+                outgoing
+                    .send_global_server_notification(ServerNotification::ThreadNameUpdated(
+                        notification,
+                    ))
+                    .await;
+            }
         }
         EventMsg::TurnDiff(turn_diff_event) => {
-            handle_turn_diff(conversation_id, &event_turn_id, turn_diff_event, &outgoing).await;
+            handle_turn_diff(
+                conversation_id,
+                &event_turn_id,
+                turn_diff_event,
+                api_version,
+                &outgoing,
+            )
+            .await;
         }
         EventMsg::PlanUpdate(plan_update_event) => {
             handle_turn_plan_update(
                 conversation_id,
                 &event_turn_id,
                 plan_update_event,
+                api_version,
                 &outgoing,
             )
             .await;
@@ -1819,38 +2001,44 @@ async fn handle_turn_diff(
     conversation_id: ThreadId,
     event_turn_id: &str,
     turn_diff_event: TurnDiffEvent,
+    api_version: ApiVersion,
     outgoing: &ThreadScopedOutgoingMessageSender,
 ) {
-    let notification = TurnDiffUpdatedNotification {
-        thread_id: conversation_id.to_string(),
-        turn_id: event_turn_id.to_string(),
-        diff: turn_diff_event.unified_diff,
-    };
-    outgoing
-        .send_server_notification(ServerNotification::TurnDiffUpdated(notification))
-        .await;
+    if let ApiVersion::V2 = api_version {
+        let notification = TurnDiffUpdatedNotification {
+            thread_id: conversation_id.to_string(),
+            turn_id: event_turn_id.to_string(),
+            diff: turn_diff_event.unified_diff,
+        };
+        outgoing
+            .send_server_notification(ServerNotification::TurnDiffUpdated(notification))
+            .await;
+    }
 }
 
 async fn handle_turn_plan_update(
     conversation_id: ThreadId,
     event_turn_id: &str,
     plan_update_event: UpdatePlanArgs,
+    api_version: ApiVersion,
     outgoing: &ThreadScopedOutgoingMessageSender,
 ) {
     // `update_plan` is a todo/checklist tool; it is not related to plan-mode updates
-    let notification = TurnPlanUpdatedNotification {
-        thread_id: conversation_id.to_string(),
-        turn_id: event_turn_id.to_string(),
-        explanation: plan_update_event.explanation,
-        plan: plan_update_event
-            .plan
-            .into_iter()
-            .map(TurnPlanStep::from)
-            .collect(),
-    };
-    outgoing
-        .send_server_notification(ServerNotification::TurnPlanUpdated(notification))
-        .await;
+    if let ApiVersion::V2 = api_version {
+        let notification = TurnPlanUpdatedNotification {
+            thread_id: conversation_id.to_string(),
+            turn_id: event_turn_id.to_string(),
+            explanation: plan_update_event.explanation,
+            plan: plan_update_event
+                .plan
+                .into_iter()
+                .map(TurnPlanStep::from)
+                .collect(),
+        };
+        outgoing
+            .send_server_notification(ServerNotification::TurnPlanUpdated(notification))
+            .await;
+    }
 }
 
 struct TurnCompletionMetadata {
@@ -2004,11 +2192,16 @@ async fn complete_command_execution_item(
 }
 
 async fn maybe_emit_raw_response_item_completed(
+    api_version: ApiVersion,
     conversation_id: ThreadId,
     turn_id: &str,
     item: codex_protocol::models::ResponseItem,
     outgoing: &ThreadScopedOutgoingMessageSender,
 ) {
+    let ApiVersion::V2 = api_version else {
+        return;
+    };
+
     let notification = RawResponseItemCompletedNotification {
         thread_id: conversation_id.to_string(),
         turn_id: turn_id.to_string(),
@@ -2020,11 +2213,16 @@ async fn maybe_emit_raw_response_item_completed(
 }
 
 pub(crate) async fn maybe_emit_hook_prompt_item_completed(
+    api_version: ApiVersion,
     conversation_id: ThreadId,
     turn_id: &str,
     item: &codex_protocol::models::ResponseItem,
     outgoing: &ThreadScopedOutgoingMessageSender,
 ) {
+    let ApiVersion::V2 = api_version else {
+        return;
+    };
+
     let codex_protocol::models::ResponseItem::Message {
         role, content, id, ..
     } = item
@@ -2132,23 +2330,14 @@ async fn handle_thread_rollback_failed(
 
     if let Some(request_id) = pending_rollback {
         outgoing
-            .send_error(request_id, invalid_request(message))
-            .await;
-    }
-}
-
-async fn respond_to_pending_interrupts(
-    thread_state: &Arc<Mutex<ThreadState>>,
-    outgoing: &ThreadScopedOutgoingMessageSender,
-) {
-    let pending = {
-        let mut state = thread_state.lock().await;
-        std::mem::take(&mut state.pending_interrupts)
-    };
-
-    for request_id in pending {
-        outgoing
-            .send_response(request_id, TurnInterruptResponse {})
+            .send_error(
+                request_id,
+                JSONRPCErrorError {
+                    code: INVALID_REQUEST_ERROR_CODE,
+                    message: message.clone(),
+                    data: None,
+                },
+            )
             .await;
     }
 }
@@ -2188,6 +2377,105 @@ async fn handle_error(
 ) {
     let mut state = thread_state.lock().await;
     state.turn_summary.last_error = Some(error);
+}
+
+async fn on_patch_approval_response(
+    call_id: String,
+    receiver: oneshot::Receiver<ClientRequestResult>,
+    codex: Arc<CodexThread>,
+) {
+    let response = receiver.await;
+    let value = match response {
+        Ok(Ok(value)) => value,
+        Ok(Err(err)) if is_turn_transition_server_request_error(&err) => return,
+        Ok(Err(err)) => {
+            error!("request failed with client error: {err:?}");
+            if let Err(submit_err) = codex
+                .submit(Op::PatchApproval {
+                    id: call_id.clone(),
+                    decision: ReviewDecision::Denied,
+                })
+                .await
+            {
+                error!("failed to submit denied PatchApproval after request failure: {submit_err}");
+            }
+            return;
+        }
+        Err(err) => {
+            error!("request failed: {err:?}");
+            if let Err(submit_err) = codex
+                .submit(Op::PatchApproval {
+                    id: call_id.clone(),
+                    decision: ReviewDecision::Denied,
+                })
+                .await
+            {
+                error!("failed to submit denied PatchApproval after request failure: {submit_err}");
+            }
+            return;
+        }
+    };
+
+    let response =
+        serde_json::from_value::<ApplyPatchApprovalResponse>(value).unwrap_or_else(|err| {
+            error!("failed to deserialize ApplyPatchApprovalResponse: {err}");
+            ApplyPatchApprovalResponse {
+                decision: ReviewDecision::Denied,
+            }
+        });
+
+    if let Err(err) = codex
+        .submit(Op::PatchApproval {
+            id: call_id,
+            decision: response.decision,
+        })
+        .await
+    {
+        error!("failed to submit PatchApproval: {err}");
+    }
+}
+
+async fn on_exec_approval_response(
+    call_id: String,
+    turn_id: String,
+    receiver: oneshot::Receiver<ClientRequestResult>,
+    conversation: Arc<CodexThread>,
+) {
+    let response = receiver.await;
+    let value = match response {
+        Ok(Ok(value)) => value,
+        Ok(Err(err)) if is_turn_transition_server_request_error(&err) => return,
+        Ok(Err(err)) => {
+            error!("request failed with client error: {err:?}");
+            return;
+        }
+        Err(err) => {
+            error!("request failed: {err:?}");
+            return;
+        }
+    };
+
+    // Try to deserialize `value` and then make the appropriate call to `codex`.
+    let response =
+        serde_json::from_value::<ExecCommandApprovalResponse>(value).unwrap_or_else(|err| {
+            error!("failed to deserialize ExecCommandApprovalResponse: {err}");
+            // If we cannot deserialize the response, we deny the request to be
+            // conservative.
+            ExecCommandApprovalResponse {
+                decision: ReviewDecision::Denied,
+            }
+        });
+
+    if let Err(err) = conversation
+        .submit(Op::ExecApproval {
+            id: call_id,
+            turn_id: Some(turn_id),
+            decision: response.decision,
+        })
+        .await
+    {
+        error!("failed to submit ExecApproval: {err}");
+    }
 }
 
 async fn on_request_user_input_response(
@@ -2962,7 +3250,7 @@ mod tests {
                 self.outgoing.clone(),
                 self.thread_state.clone(),
                 self.thread_watch_manager.clone(),
-                Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
+                ApiVersion::V2,
                 "test-provider".to_string(),
                 &self.codex_home,
             )
@@ -3111,10 +3399,7 @@ mod tests {
         let conversation_id = ThreadId::new();
         let thread_state = new_thread_state();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -3183,10 +3468,7 @@ mod tests {
         let conversation_id = ThreadId::new();
         let thread_state = new_thread_state();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -3272,19 +3554,11 @@ mod tests {
             thread_id: conversation_id,
             thread: conversation,
             ..
-        } = thread_manager
-            .start_thread(
-                config.clone(),
-                codex_core::thread_store_from_config(&config),
-            )
-            .await?;
+        } = thread_manager.start_thread(config).await?;
         let thread_state = new_thread_state();
         let thread_watch_manager = ThreadWatchManager::new();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -3705,7 +3979,7 @@ mod tests {
             file_system: Some(CoreFileSystemPermissions {
                 entries: vec![FileSystemSandboxEntry {
                     path: FileSystemPath::Special {
-                        value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
+                        value: FileSystemSpecialPath::CurrentWorkingDirectory,
                     },
                     access: FileSystemAccessMode::Write,
                 }],
@@ -3751,7 +4025,7 @@ mod tests {
             file_system: Some(CoreFileSystemPermissions {
                 entries: vec![FileSystemSandboxEntry {
                     path: FileSystemPath::Special {
-                        value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
+                        value: FileSystemSpecialPath::CurrentWorkingDirectory,
                     },
                     access: FileSystemAccessMode::Write,
                 }],
@@ -3801,8 +4075,7 @@ mod tests {
                             "path": {
                                 "type": "special",
                                 "value": {
-                                    "kind": "project_roots",
-                                    "subpath": null
+                                    "kind": "current_working_directory"
                                 }
                             },
                             "access": "write"
@@ -3910,10 +4183,7 @@ mod tests {
         let conversation_id = ThreadId::new();
         let event_turn_id = "complete1".to_string();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -3922,19 +4192,17 @@ mod tests {
         let thread_state = new_thread_state();
         {
             let mut state = thread_state.lock().await;
-            state.track_current_turn_event(
-                &event_turn_id,
-                &EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
+            state.track_current_turn_event(&EventMsg::TurnStarted(
+                codex_protocol::protocol::TurnStartedEvent {
                     turn_id: event_turn_id.clone(),
                     started_at: Some(42),
                     model_context_window: None,
                     collaboration_mode_kind: Default::default(),
-                }),
-            );
-            state.track_current_turn_event(
+                },
+            ));
+            state.track_current_turn_event(&EventMsg::TurnComplete(turn_complete_event(
                 &event_turn_id,
-                &EventMsg::TurnComplete(turn_complete_event(&event_turn_id)),
-            );
+            )));
         }
 
         handle_turn_complete(
@@ -3979,10 +4247,7 @@ mod tests {
         )
         .await;
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4030,10 +4295,7 @@ mod tests {
         )
         .await;
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4075,10 +4337,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_turn_plan_update_emits_notification_for_v2() -> Result<()> {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4100,7 +4359,14 @@ mod tests {
 
         let conversation_id = ThreadId::new();
 
-        handle_turn_plan_update(conversation_id, "turn-123", update, &outgoing).await;
+        handle_turn_plan_update(
+            conversation_id,
+            "turn-123",
+            update,
+            ApiVersion::V2,
+            &outgoing,
+        )
+        .await;
 
         let msg = recv_broadcast_message(&mut rx).await?;
         match msg {
@@ -4125,10 +4391,7 @@ mod tests {
         let conversation_id = ThreadId::new();
         let turn_id = "turn-123".to_string();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4217,10 +4480,7 @@ mod tests {
         let conversation_id = ThreadId::new();
         let turn_id = "turn-456".to_string();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4293,10 +4553,7 @@ mod tests {
         let thread_state = new_thread_state();
 
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4558,10 +4815,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_turn_diff_emits_v2_notification() -> Result<()> {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4576,6 +4830,7 @@ mod tests {
             TurnDiffEvent {
                 unified_diff: unified_diff.clone(),
             },
+            ApiVersion::V2,
             &outgoing,
         )
         .await;
@@ -4596,12 +4851,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_handle_turn_diff_is_noop_for_v1() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
+        let outgoing = ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            vec![ConnectionId(1)],
+            ThreadId::new(),
+        );
+        let conversation_id = ThreadId::new();
+
+        handle_turn_diff(
+            conversation_id,
+            "turn-1",
+            TurnDiffEvent {
+                unified_diff: "diff".to_string(),
+            },
+            ApiVersion::V1,
+            &outgoing,
+        )
+        .await;
+
+        assert!(rx.try_recv().is_err(), "no messages expected");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_hook_prompt_raw_response_emits_item_completed() -> Result<()> {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let conversation_id = ThreadId::new();
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
@@ -4614,7 +4892,14 @@ mod tests {
         ])
         .expect("hook prompt message");
 
-        maybe_emit_hook_prompt_item_completed(conversation_id, "turn-1", &item, &outgoing).await;
+        maybe_emit_hook_prompt_item_completed(
+            ApiVersion::V2,
+            conversation_id,
+            "turn-1",
+            &item,
+            &outgoing,
+        )
+        .await;
 
         let msg = recv_broadcast_message(&mut rx).await?;
         match msg {

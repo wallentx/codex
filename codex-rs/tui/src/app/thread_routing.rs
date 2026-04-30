@@ -194,17 +194,6 @@ impl App {
         store.session.as_ref().map(|session| session.cwd.clone())
     }
 
-    async fn thread_file_change_changes(
-        &self,
-        thread_id: ThreadId,
-        turn_id: &str,
-        item_id: &str,
-    ) -> Option<Vec<codex_app_server_protocol::FileUpdateChange>> {
-        let channel = self.thread_event_channels.get(&thread_id)?;
-        let store = channel.store.lock().await;
-        store.file_change_changes(turn_id, item_id)
-    }
-
     pub(super) async fn interactive_request_for_thread_request(
         &self,
         thread_id: ThreadId,
@@ -275,11 +264,7 @@ impl App {
                         .thread_cwd(thread_id)
                         .await
                         .unwrap_or_else(|| self.config.cwd.clone()),
-                    changes: self
-                        .thread_file_change_changes(thread_id, &params.turn_id, &params.item_id)
-                        .await
-                        .map(crate::app_server_approval_conversions::file_update_changes_to_core)
-                        .unwrap_or_default(),
+                    changes: HashMap::new(),
                 }),
             ),
             ServerRequest::McpServerElicitationRequest { request_id, params } => {
@@ -326,7 +311,6 @@ impl App {
     pub(super) fn push_thread_interactive_request(&mut self, request: ThreadInteractiveRequest) {
         match request {
             ThreadInteractiveRequest::Approval(request) => {
-                self.render_inactive_patch_preview(&request);
                 self.chat_widget.push_approval_request(request);
             }
             ThreadInteractiveRequest::McpServerElicitation(request) => {
@@ -334,23 +318,6 @@ impl App {
                     .push_mcp_server_elicitation_request(request);
             }
         }
-    }
-
-    fn render_inactive_patch_preview(&mut self, request: &ApprovalRequest) {
-        let ApprovalRequest::ApplyPatch {
-            thread_label,
-            cwd,
-            changes,
-            ..
-        } = request
-        else {
-            return;
-        };
-        if thread_label.is_none() || changes.is_empty() {
-            return;
-        }
-        self.chat_widget
-            .add_to_history(history_cell::new_patch_event(changes.clone(), cwd));
     }
 
     pub(super) async fn pending_inactive_thread_requests(&self) -> Vec<(ThreadId, ServerRequest)> {
@@ -529,6 +496,7 @@ impl App {
                 cwd,
                 approval_policy,
                 approvals_reviewer,
+                sandbox_policy,
                 permission_profile,
                 model,
                 effort,
@@ -604,24 +572,16 @@ impl App {
                     }
                 }
                 if should_start_turn {
-                    let config = self.chat_widget.config_ref();
-                    let approvals_reviewer =
-                        approvals_reviewer.unwrap_or(config.approvals_reviewer);
-                    let active_permission_profile =
-                        if config.permissions.permission_profile() == permission_profile.clone() {
-                            config.permissions.active_permission_profile()
-                        } else {
-                            None
-                        };
                     app_server
                         .turn_start(
                             thread_id,
                             items.to_vec(),
                             cwd.clone(),
                             approval_policy,
-                            approvals_reviewer,
+                            approvals_reviewer
+                                .unwrap_or(self.chat_widget.config_ref().approvals_reviewer),
+                            sandbox_policy.clone(),
                             permission_profile.clone(),
-                            active_permission_profile,
                             model.to_string(),
                             effort,
                             *summary,
@@ -715,8 +675,7 @@ impl App {
                 Ok(true)
             }
             AppCommandView::OverrideTurnContext { .. } => Ok(true),
-            AppCommandView::ApproveGuardianDeniedAction { event }
-            | AppCommandView::Other(Op::ApproveGuardianDeniedAction { event }) => {
+            AppCommandView::Other(Op::ApproveGuardianDeniedAction { event }) => {
                 app_server
                     .thread_approve_guardian_denied_action(thread_id, event)
                     .await?;
