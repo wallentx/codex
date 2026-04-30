@@ -29,13 +29,6 @@ pub(super) async fn read_thread(
     let thread_id = params.thread_id;
     if let Some(metadata) = read_sqlite_metadata(store, thread_id).await
         && (params.include_archived || metadata.archived_at.is_none())
-        && (!params.include_history
-            || sqlite_rollout_path_can_load_history_for_thread(
-                store,
-                &metadata.rollout_path,
-                thread_id,
-            )
-            .await)
     {
         let mut thread = stored_thread_from_sqlite_metadata(store, metadata).await;
         attach_history_if_requested(&mut thread, params.include_history).await?;
@@ -53,22 +46,6 @@ pub(super) async fn read_thread(
     Ok(thread)
 }
 
-async fn sqlite_rollout_path_can_load_history_for_thread(
-    store: &LocalThreadStore,
-    path: &std::path::Path,
-    thread_id: codex_protocol::ThreadId,
-) -> bool {
-    if !tokio::fs::try_exists(path).await.unwrap_or(false) {
-        return false;
-    }
-    // SQLite metadata can outlive a moved/recreated rollout path. When history is
-    // requested, verify the path still resolves to the requested thread before
-    // trusting it as the source replay.
-    read_thread_from_rollout_path(store, path.to_path_buf())
-        .await
-        .is_ok_and(|thread| thread.thread_id == thread_id)
-}
-
 pub(super) async fn read_thread_by_rollout_path(
     store: &LocalThreadStore,
     rollout_path: std::path::PathBuf,
@@ -81,22 +58,6 @@ pub(super) async fn read_thread_by_rollout_path(
         return Err(ThreadStoreError::InvalidRequest {
             message: format!("thread {} is archived", thread.thread_id),
         });
-    }
-    if let Some(metadata) = read_sqlite_metadata(store, thread.thread_id).await {
-        let existing_git_info = thread.git_info.take();
-        let (fallback_sha, fallback_branch, fallback_origin_url) = match existing_git_info {
-            Some(info) => (
-                info.commit_hash.map(|sha| sha.0),
-                info.branch,
-                info.repository_url,
-            ),
-            None => (None, None, None),
-        };
-        thread.git_info = git_info_from_parts(
-            metadata.git_sha.or(fallback_sha),
-            metadata.git_branch.or(fallback_branch),
-            metadata.git_origin_url.or(fallback_origin_url),
-        );
     }
     attach_history_if_requested(&mut thread, include_history).await?;
     Ok(thread)
@@ -450,55 +411,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_thread_by_rollout_path_prefers_sqlite_git_info() {
-        let home = TempDir::new().expect("temp dir");
-        let config = test_config(home.path());
-        let store = LocalThreadStore::new(config.clone());
-        let uuid = Uuid::from_u128(223);
-        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
-        let active_path =
-            write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file");
-        let runtime = codex_state::StateRuntime::init(
-            config.sqlite_home.clone(),
-            config.model_provider_id.clone(),
-        )
-        .await
-        .expect("state db should initialize");
-        let mut builder = ThreadMetadataBuilder::new(
-            thread_id,
-            active_path.clone(),
-            Utc::now(),
-            SessionSource::Cli,
-        );
-        builder.model_provider = Some(config.model_provider_id.clone());
-        builder.git_branch = Some("sqlite-branch".to_string());
-        runtime
-            .upsert_thread(&builder.build(config.model_provider_id.as_str()))
-            .await
-            .expect("state db upsert should succeed");
-
-        let thread = store
-            .read_thread_by_rollout_path(
-                active_path,
-                /*include_archived*/ false,
-                /*include_history*/ false,
-            )
-            .await
-            .expect("read thread by rollout path");
-
-        let git_info = thread.git_info.expect("git info should be present");
-        assert_eq!(git_info.branch.as_deref(), Some("sqlite-branch"));
-        assert_eq!(
-            git_info.commit_hash.as_ref().map(|sha| sha.0.as_str()),
-            Some("abcdef")
-        );
-        assert_eq!(
-            git_info.repository_url.as_deref(),
-            Some("https://example.com/repo.git")
-        );
-    }
-
-    #[tokio::test]
     async fn read_thread_returns_archived_rollout_when_requested() {
         let home = TempDir::new().expect("temp dir");
         let store = LocalThreadStore::new(test_config(home.path()));
@@ -726,102 +638,6 @@ mod tests {
         let history = thread.history.expect("history should load");
         assert_eq!(history.thread_id, thread_id);
         assert_eq!(history.items.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn read_thread_falls_back_to_rollout_search_when_sqlite_path_is_stale() {
-        let home = TempDir::new().expect("temp dir");
-        let external = TempDir::new().expect("external temp dir");
-        let config = test_config(home.path());
-        let store = LocalThreadStore::new(config.clone());
-        let uuid = Uuid::from_u128(220);
-        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
-        let rollout_path =
-            write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file");
-        let stale_path = external.path().join("missing-rollout.jsonl");
-        let runtime = codex_state::StateRuntime::init(
-            config.sqlite_home.clone(),
-            config.model_provider_id.clone(),
-        )
-        .await
-        .expect("state db should initialize");
-        let mut builder = ThreadMetadataBuilder::new(
-            thread_id,
-            stale_path.clone(),
-            Utc::now(),
-            SessionSource::Cli,
-        );
-        builder.model_provider = Some("stale-sqlite-provider".to_string());
-        let mut metadata = builder.build(config.model_provider_id.as_str());
-        metadata.first_user_message = Some("stale sqlite preview".to_string());
-        runtime
-            .upsert_thread(&metadata)
-            .await
-            .expect("state db upsert should succeed");
-
-        let thread = store
-            .read_thread(ReadThreadParams {
-                thread_id,
-                include_archived: true,
-                include_history: true,
-            })
-            .await
-            .expect("read thread");
-
-        assert_eq!(thread.thread_id, thread_id);
-        assert_eq!(thread.rollout_path, Some(rollout_path));
-        assert_eq!(thread.preview, "Hello from user");
-        assert_eq!(thread.model_provider, config.model_provider_id);
-        let history = thread.history.expect("history should load");
-        assert_eq!(history.thread_id, thread_id);
-        assert_eq!(history.items.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn read_thread_falls_back_when_sqlite_path_points_to_another_thread() {
-        let home = TempDir::new().expect("temp dir");
-        let external = TempDir::new().expect("external temp dir");
-        let config = test_config(home.path());
-        let store = LocalThreadStore::new(config.clone());
-        let uuid = Uuid::from_u128(221);
-        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
-        let rollout_path =
-            write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file");
-        let other_uuid = Uuid::from_u128(222);
-        let stale_path = write_session_file(external.path(), "2025-01-04T12-00-00", other_uuid)
-            .expect("other session file");
-        let runtime = codex_state::StateRuntime::init(
-            config.sqlite_home.clone(),
-            config.model_provider_id.clone(),
-        )
-        .await
-        .expect("state db should initialize");
-        let mut builder =
-            ThreadMetadataBuilder::new(thread_id, stale_path, Utc::now(), SessionSource::Cli);
-        builder.model_provider = Some("wrong-sqlite-provider".to_string());
-        let mut metadata = builder.build(config.model_provider_id.as_str());
-        metadata.first_user_message = Some("wrong sqlite preview".to_string());
-        runtime
-            .upsert_thread(&metadata)
-            .await
-            .expect("state db upsert should succeed");
-
-        let thread = store
-            .read_thread(ReadThreadParams {
-                thread_id,
-                include_archived: true,
-                include_history: true,
-            })
-            .await
-            .expect("read thread");
-
-        assert_eq!(thread.thread_id, thread_id);
-        assert_eq!(thread.rollout_path, Some(rollout_path));
-        assert_eq!(thread.preview, "Hello from user");
-        assert_eq!(thread.model_provider, config.model_provider_id);
-        let history = thread.history.expect("history should load");
-        assert_eq!(history.thread_id, thread_id);
-        assert_eq!(history.items.len(), 2);
     }
 
     #[tokio::test]
