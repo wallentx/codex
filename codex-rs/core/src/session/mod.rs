@@ -18,7 +18,6 @@ use crate::build_available_skills;
 use crate::commit_attribution::commit_message_trailer_instruction;
 use crate::compact;
 use crate::config::ManagedFeatures;
-use crate::config::resolve_tool_suggest_config_from_layer_stack;
 use crate::connectors;
 use crate::context::ApprovedCommandPrefixSaved;
 use crate::context::AppsInstructions;
@@ -91,7 +90,6 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::mcp::CallToolResult;
-use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::PermissionProfile;
@@ -170,6 +168,7 @@ use crate::compact::collect_user_messages;
 use crate::config::Config;
 use crate::config::Constrained;
 use crate::config::ConstraintResult;
+use crate::config::GhostSnapshotConfig;
 use crate::config::StartedNetworkProxy;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::context_manager::ContextManager;
@@ -177,8 +176,8 @@ use crate::context_manager::TotalTokenUsageBreakdown;
 use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::types::McpServerConfig;
+use codex_config::types::ShellEnvironmentPolicy;
 use codex_model_provider_info::ModelProviderInfo;
-use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
@@ -186,7 +185,6 @@ use codex_protocol::exec_output::StreamOutput;
 
 mod handlers;
 mod mcp;
-mod multi_agents;
 mod review;
 mod rollout_reconstruction;
 #[allow(clippy::module_inception)]
@@ -273,6 +271,7 @@ use crate::context::UserInstructions;
 use crate::exec_policy::ExecPolicyUpdateError;
 use crate::guardian::GuardianReviewSessionManager;
 use crate::mcp::McpManager;
+use crate::memories;
 use crate::network_policy_decision::execpolicy_network_rule_amendment;
 use crate::plugins::PluginsManager;
 use crate::rollout::map_session_init_error;
@@ -290,7 +289,12 @@ use crate::state::SessionState;
 use crate::stream_events_utils::HandleOutputCtx;
 #[cfg(test)]
 use crate::stream_events_utils::handle_output_item_done;
+use crate::tasks::GhostSnapshotTask;
 use crate::tasks::ReviewTask;
+use crate::tasks::SessionTask;
+use crate::tasks::SessionTaskContext;
+use crate::tools::js_repl::JsReplHandle;
+use crate::tools::js_repl::resolve_compatible_node;
 use crate::tools::network_approval::NetworkApprovalService;
 use crate::tools::network_approval::build_blocked_request_observer;
 use crate::tools::network_approval::build_network_policy_decider;
@@ -356,6 +360,7 @@ use codex_protocol::user_input::UserInput;
 use codex_tools::ToolsConfig;
 use codex_tools::ToolsConfigParams;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_readiness::Readiness;
 use codex_utils_readiness::ReadinessFlag;
 #[cfg(test)]
 use codex_utils_stream_parser::ProposedPlanSegment;
@@ -490,10 +495,37 @@ impl Codex {
 
         if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) = session_source
             && depth >= config.agent_max_depth
-            && !config.features.enabled(Feature::MultiAgentV2)
         {
             let _ = config.features.disable(Feature::SpawnCsv);
             let _ = config.features.disable(Feature::Collab);
+        }
+
+        if config.features.enabled(Feature::JsRepl)
+            && let Err(err) = resolve_compatible_node(config.js_repl_node_path.as_deref()).await
+        {
+            let _ = config.features.disable(Feature::JsRepl);
+            let _ = config.features.disable(Feature::JsReplToolsOnly);
+            let message = if config.features.enabled(Feature::JsRepl) {
+                format!(
+                    "`js_repl` remains enabled because enterprise requirements pin it on, but the configured Node runtime is unavailable or incompatible. {err}"
+                )
+            } else {
+                format!(
+                    "Disabled `js_repl` for this session because the configured Node runtime is unavailable or incompatible. {err}"
+                )
+            };
+            warn!("{message}");
+            config.startup_warnings.push(message);
+        }
+        if config.features.enabled(Feature::CodeMode)
+            && let Err(err) = resolve_compatible_node(config.js_repl_node_path.as_deref()).await
+        {
+            let message = format!(
+                "Disabled `exec` for this session because the configured Node runtime is unavailable or incompatible. {err}"
+            );
+            warn!("{message}");
+            let _ = config.features.disable(Feature::CodeMode);
+            config.startup_warnings.push(message);
         }
 
         let user_instructions = AgentsMdManager::new(&config)
@@ -516,10 +548,9 @@ impl Codex {
         };
 
         let config = Arc::new(config);
-        let refresh_strategy = if session_source.is_non_root_agent() {
-            codex_models_manager::manager::RefreshStrategy::Offline
-        } else {
-            codex_models_manager::manager::RefreshStrategy::OnlineIfUncached
+        let refresh_strategy = match session_source {
+            SessionSource::SubAgent(_) => codex_models_manager::manager::RefreshStrategy::Offline,
+            _ => codex_models_manager::manager::RefreshStrategy::OnlineIfUncached,
         };
         if config.model.is_none()
             || !matches!(
@@ -603,8 +634,9 @@ impl Codex {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
-            permission_profile: config.permissions.permission_profile.clone(),
-            active_permission_profile: config.permissions.active_permission_profile(),
+            sandbox_policy: config.permissions.sandbox_policy.clone(),
+            file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
+            network_sandbox_policy: config.permissions.network_sandbox_policy,
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -845,26 +877,8 @@ impl Session {
         }
     }
 
-    pub(crate) async fn configured_multi_agent_v2_usage_hint_texts(&self) -> Vec<String> {
-        if !self.features.enabled(Feature::MultiAgentV2) {
-            return Vec::new();
-        }
-
-        let state = self.state.lock().await;
-        let config = &state.session_configuration.original_config_do_not_use;
-        [
-            config.multi_agent_v2.root_agent_usage_hint_text.clone(),
-            config.multi_agent_v2.subagent_usage_hint_text.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
-    }
-
-    fn managed_network_proxy_active_for_permission_profile(
-        permission_profile: &PermissionProfile,
-    ) -> bool {
-        !matches!(permission_profile, PermissionProfile::Disabled)
+    fn managed_network_proxy_active_for_sandbox_policy(sandbox_policy: &SandboxPolicy) -> bool {
+        !matches!(sandbox_policy, SandboxPolicy::DangerFullAccess)
     }
 
     /// Builds the `x-codex-beta-features` header value for this session.
@@ -897,7 +911,7 @@ impl Session {
     async fn start_managed_network_proxy(
         spec: &crate::config::NetworkProxySpec,
         exec_policy: &codex_execpolicy::Policy,
-        permission_profile: &PermissionProfile,
+        sandbox_policy: &SandboxPolicy,
         network_policy_decider: Option<Arc<dyn codex_network_proxy::NetworkPolicyDecider>>,
         blocked_request_observer: Option<Arc<dyn codex_network_proxy::BlockedRequestObserver>>,
         managed_network_requirements_enabled: bool,
@@ -914,7 +928,7 @@ impl Session {
             .unwrap_or_else(|_| spec.clone());
         let network_proxy = spec
             .start_proxy(
-                permission_profile,
+                sandbox_policy,
                 network_policy_decider,
                 blocked_request_observer,
                 managed_network_requirements_enabled,
@@ -932,7 +946,7 @@ impl Session {
         Ok((network_proxy, session_network_proxy))
     }
 
-    async fn refresh_managed_network_proxy_for_current_permission_profile(&self) {
+    async fn refresh_managed_network_proxy_for_current_sandbox_policy(&self) {
         let Some(started_proxy) = self.services.network_proxy.as_ref() else {
             return;
         };
@@ -954,7 +968,7 @@ impl Session {
         };
 
         let spec = match spec
-            .recompute_for_permission_profile(&session_configuration.permission_profile())
+            .recompute_for_sandbox_policy(session_configuration.sandbox_policy.get())
         {
             Ok(spec) => spec,
             Err(err) => {
@@ -1146,10 +1160,10 @@ impl Session {
         let turn_context = self.new_default_turn().await;
         let is_subagent = {
             let state = self.state.lock().await;
-            state
-                .session_configuration
-                .session_source
-                .is_non_root_agent()
+            matches!(
+                state.session_configuration.session_source,
+                SessionSource::SubAgent(_)
+            )
         };
         let has_prior_user_turns = initial_history_has_prior_user_turns(&conversation_history);
         {
@@ -1304,7 +1318,7 @@ impl Session {
         &self,
         updates: SessionSettingsUpdate,
     ) -> ConstraintResult<()> {
-        let (previous_cwd, permission_profile_changed, next_cwd, codex_home, session_source) = {
+        let (previous_cwd, sandbox_policy_changed, next_cwd, codex_home, session_source) = {
             let mut state = self.state.lock().await;
             let updated = match state.session_configuration.apply(&updates) {
                 Ok(updated) => updated,
@@ -1315,17 +1329,15 @@ impl Session {
             };
 
             let previous_cwd = state.session_configuration.cwd.clone();
-            let previous_permission_profile = state.session_configuration.permission_profile();
-            let updated_permission_profile = updated.permission_profile();
-            let permission_profile_changed =
-                previous_permission_profile != updated_permission_profile;
+            let sandbox_policy_changed =
+                state.session_configuration.sandbox_policy != updated.sandbox_policy;
             let next_cwd = updated.cwd.clone();
             let codex_home = updated.codex_home.clone();
             let session_source = updated.session_source.clone();
             state.session_configuration = updated;
             (
                 previous_cwd,
-                permission_profile_changed,
+                sandbox_policy_changed,
                 next_cwd,
                 codex_home,
                 session_source,
@@ -1338,8 +1350,8 @@ impl Session {
             &codex_home,
             &session_source,
         );
-        if permission_profile_changed {
-            self.refresh_managed_network_proxy_for_current_permission_profile()
+        if sandbox_policy_changed {
+            self.refresh_managed_network_proxy_for_current_sandbox_policy()
                 .await;
         }
 
@@ -1381,9 +1393,6 @@ impl Session {
     }
 
     pub(crate) async fn reload_user_config_layer(&self) {
-        // Refresh layer-backed runtime state for an existing session, including enabled plugin,
-        // skill, and hook state. Derived config fields such as feature gates and legacy notify
-        // settings remain session-static.
         let config_toml_path = {
             let state = self.state.lock().await;
             state
@@ -1409,36 +1418,14 @@ impl Session {
             }
         };
 
-        let config = {
-            let mut state = self.state.lock().await;
-            let mut config = (*state.session_configuration.original_config_do_not_use).clone();
-            config.config_layer_stack = config
-                .config_layer_stack
-                .with_user_config(&config_toml_path, user_config);
-            config.tool_suggest =
-                resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
-            let config = Arc::new(config);
-            state.session_configuration.original_config_do_not_use = Arc::clone(&config);
-            config
-        };
+        let mut state = self.state.lock().await;
+        let mut config = (*state.session_configuration.original_config_do_not_use).clone();
+        config.config_layer_stack = config
+            .config_layer_stack
+            .with_user_config(&config_toml_path, user_config);
+        state.session_configuration.original_config_do_not_use = Arc::new(config);
         self.services.skills_manager.clear_cache();
         self.services.plugins_manager.clear_cache();
-        let hooks = build_hooks_for_config(
-            config.as_ref(),
-            self.services.plugins_manager.as_ref(),
-            self.services.user_shell.as_ref(),
-        )
-        .await;
-
-        let state = self.state.lock().await;
-        // A newer reload may have updated the config while this hook build was in flight.
-        // Only publish hooks derived from the current config snapshot.
-        if Arc::ptr_eq(
-            &state.session_configuration.original_config_do_not_use,
-            &config,
-        ) {
-            self.services.hooks.store(Arc::new(hooks));
-        }
     }
 
     async fn build_settings_update_items(
@@ -1728,7 +1715,6 @@ impl Session {
             .inject_response_items(vec![ResponseInputItem::Message {
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText { text }],
-                phase: None,
             }])
             .await
             .is_err()
@@ -1825,7 +1811,6 @@ impl Session {
             .inject_response_items(vec![ResponseInputItem::Message {
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText { text }],
-                phase: None,
             }])
             .await
             .is_err()
@@ -2407,6 +2392,7 @@ impl Session {
             content: vec![ContentItem::InputText {
                 text: format!("Warning: {}", message.into()),
             }],
+            end_turn: None,
             phase: None,
         };
 
@@ -2562,8 +2548,8 @@ impl Session {
         }
         if turn_context.config.include_permissions_instructions {
             developer_sections.push(
-                PermissionsInstructions::from_permission_profile(
-                    &turn_context.permission_profile,
+                PermissionsInstructions::from_policy(
+                    turn_context.sandbox_policy.get(),
                     turn_context.approval_policy.value(),
                     turn_context.config.approvals_reviewer,
                     self.services.exec_policy.current().as_ref(),
@@ -2641,8 +2627,12 @@ impl Session {
             }
         }
         if turn_context.config.include_skill_instructions {
+            let implicit_skills = turn_context
+                .turn_skills
+                .outcome
+                .allowed_skills_for_implicit_invocation();
             let available_skills = build_available_skills(
-                &turn_context.turn_skills.outcome,
+                &implicit_skills,
                 default_skill_metadata_budget(turn_context.model_info.context_window),
                 SkillRenderSideEffects::ThreadStart {
                     session_telemetry: &self.services.session_telemetry,
@@ -2702,22 +2692,11 @@ impl Session {
             );
         }
 
-        let multi_agent_v2_usage_hint_text =
-            multi_agents::usage_hint_text(turn_context, &session_source);
-
-        let mut items = Vec::with_capacity(4);
+        let mut items = Vec::with_capacity(3);
         if let Some(developer_message) =
             crate::context_manager::updates::build_developer_update_item(developer_sections)
         {
             items.push(developer_message);
-        }
-        if let Some(usage_hint_text) = multi_agent_v2_usage_hint_text
-            && let Some(usage_hint_message) =
-                crate::context_manager::updates::build_developer_update_item(vec![
-                    usage_hint_text.to_string(),
-                ])
-        {
-            items.push(usage_hint_message);
         }
         if let Some(contextual_user_message) =
             crate::context_manager::updates::build_contextual_user_message(contextual_user_sections)
@@ -2964,6 +2943,34 @@ impl Session {
             additional_details: Some(additional_details),
         });
         self.send_event(turn_context, event).await;
+    }
+
+    async fn maybe_start_ghost_snapshot(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        cancellation_token: CancellationToken,
+    ) {
+        if !self.enabled(Feature::GhostCommit) {
+            return;
+        }
+        let token = match turn_context.tool_call_gate.subscribe().await {
+            Ok(token) => token,
+            Err(err) => {
+                warn!("failed to subscribe to ghost snapshot readiness: {err}");
+                return;
+            }
+        };
+
+        info!("spawning ghost snapshot task");
+        let task = GhostSnapshotTask::new(token);
+        Arc::new(task)
+            .run(
+                Arc::new(SessionTaskContext::new(self.clone())),
+                turn_context.clone(),
+                Vec::new(),
+                cancellation_token,
+            )
+            .await;
     }
 
     /// Inject additional user input into the currently active turn.
@@ -3216,16 +3223,16 @@ impl Session {
 
     pub async fn interrupt_task(self: &Arc<Self>) {
         info!("interrupt received: abort current task, if any");
-        let had_active_turn = self.active_turn.lock().await.is_some();
-        // Even without an active task, interrupt handling pauses any active goal.
-        self.abort_all_tasks(TurnAbortReason::Interrupted).await;
-        if !had_active_turn {
+        let has_active_turn = { self.active_turn.lock().await.is_some() };
+        if has_active_turn {
+            self.abort_all_tasks(TurnAbortReason::Interrupted).await;
+        } else {
             self.cancel_mcp_startup().await;
         }
     }
 
-    pub(crate) fn hooks(&self) -> Arc<Hooks> {
-        self.services.hooks.load_full()
+    pub(crate) fn hooks(&self) -> &Hooks {
+        &self.services.hooks
     }
 
     pub(crate) fn user_shell(&self) -> Arc<shell::Shell> {
@@ -3349,37 +3356,7 @@ fn errors_to_info(errors: &[SkillError]) -> Vec<SkillErrorInfo> {
         .collect()
 }
 
-use codex_memories_read::build_memory_tool_developer_instructions;
-
-/// Builds the hook engine for one config snapshot, including any enabled plugin hooks.
-async fn build_hooks_for_config(
-    config: &Config,
-    plugins_manager: &PluginsManager,
-    user_shell: &crate::shell::Shell,
-) -> Hooks {
-    let mut hook_shell_argv = user_shell.derive_exec_args("", /*use_login_shell*/ false);
-    let hook_shell_program = hook_shell_argv.remove(0);
-    let _ = hook_shell_argv.pop();
-    let plugin_hooks_enabled = config.features.enabled(Feature::PluginHooks);
-    let (plugin_hook_sources, plugin_hook_load_warnings) = if plugin_hooks_enabled {
-        let plugin_outcome = plugins_manager.plugins_for_config(config).await;
-        (
-            plugin_outcome.effective_plugin_hook_sources(),
-            plugin_outcome.effective_plugin_hook_warnings(),
-        )
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    Hooks::new(HooksConfig {
-        legacy_notify_argv: config.notify.clone(),
-        feature_enabled: config.features.enabled(Feature::CodexHooks),
-        config_layer_stack: Some(config.config_layer_stack.clone()),
-        plugin_hook_sources,
-        plugin_hook_load_warnings,
-        shell_program: Some(hook_shell_program),
-        shell_args: hook_shell_argv,
-    })
-}
+use crate::memories::prompts::build_memory_tool_developer_instructions;
 
 #[cfg(test)]
 pub(crate) mod tests;
