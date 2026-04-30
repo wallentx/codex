@@ -2,8 +2,8 @@ use crate::codex_message_processor::ApiVersion;
 use crate::codex_message_processor::read_rollout_items_from_rollout;
 use crate::codex_message_processor::read_summary_from_rollout;
 use crate::codex_message_processor::summary_to_thread;
-use crate::error_code::internal_error;
-use crate::error_code::invalid_request;
+use crate::error_code::INTERNAL_ERROR_CODE;
+use crate::error_code::INVALID_REQUEST_ERROR_CODE;
 use crate::outgoing_message::ClientRequestResult;
 use crate::outgoing_message::ThreadScopedOutgoingMessageSender;
 use crate::server_request_error::is_turn_transition_server_request_error;
@@ -51,6 +51,7 @@ use codex_app_server_protocol::HookStartedNotification;
 use codex_app_server_protocol::InterruptConversationResponse;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
+use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::McpServerElicitationAction;
 use codex_app_server_protocol::McpServerElicitationRequestParams;
 use codex_app_server_protocol::McpServerElicitationRequestResponse;
@@ -77,7 +78,6 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequestPayload;
 use codex_app_server_protocol::SkillsChangedNotification;
 use codex_app_server_protocol::TerminalInteractionNotification;
-use codex_app_server_protocol::ThreadGoalUpdatedNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadNameUpdatedNotification;
 use codex_app_server_protocol::ThreadRealtimeClosedNotification;
@@ -178,7 +178,6 @@ pub(crate) async fn apply_bespoke_event_handling(
     outgoing: ThreadScopedOutgoingMessageSender,
     thread_state: Arc<tokio::sync::Mutex<ThreadState>>,
     thread_watch_manager: ThreadWatchManager,
-    thread_list_state_permit: Arc<tokio::sync::Semaphore>,
     api_version: ApiVersion,
     fallback_model_provider: String,
     codex_home: &Path,
@@ -223,7 +222,6 @@ pub(crate) async fn apply_bespoke_event_handling(
         EventMsg::TurnComplete(turn_complete_event) => {
             // All per-thread requests are bound to a turn, so abort them.
             outgoing.abort_pending_server_requests().await;
-            respond_to_pending_interrupts(&thread_state, &outgoing, /*abort_reason*/ None).await;
             let turn_failed = thread_state.lock().await.turn_summary.last_error.is_some();
             thread_watch_manager
                 .note_turn_completed(&conversation_id.to_string(), turn_failed)
@@ -1848,12 +1846,26 @@ pub(crate) async fn apply_bespoke_event_handling(
         EventMsg::TurnAborted(turn_aborted_event) => {
             // All per-thread requests are bound to a turn, so abort them.
             outgoing.abort_pending_server_requests().await;
-            respond_to_pending_interrupts(
-                &thread_state,
-                &outgoing,
-                Some(turn_aborted_event.reason.clone()),
-            )
-            .await;
+            let pending = {
+                let mut state = thread_state.lock().await;
+                std::mem::take(&mut state.pending_interrupts)
+            };
+            if !pending.is_empty() {
+                for (rid, ver) in pending {
+                    match ver {
+                        ApiVersion::V1 => {
+                            let response = InterruptConversationResponse {
+                                abort_reason: turn_aborted_event.reason.clone(),
+                            };
+                            outgoing.send_response(rid, response).await;
+                        }
+                        ApiVersion::V2 => {
+                            let response = TurnInterruptResponse {};
+                            outgoing.send_response(rid, response).await;
+                        }
+                    }
+                }
+            }
 
             thread_watch_manager
                 .note_turn_interrupted(&conversation_id.to_string())
@@ -1875,27 +1887,13 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
 
             if let Some(request_id) = pending {
-                let _thread_list_state_permit = match thread_list_state_permit.acquire().await {
-                    Ok(permit) => permit,
-                    Err(err) => {
-                        outgoing
-                            .send_error(
-                                request_id,
-                                internal_error(format!(
-                                    "failed to acquire thread list state permit: {err}"
-                                )),
-                            )
-                            .await;
-                        return;
-                    }
-                };
                 let Some(rollout_path) = conversation.rollout_path() else {
-                    outgoing
-                        .send_error(
-                            request_id,
-                            invalid_request("thread has no persisted rollout"),
-                        )
-                        .await;
+                    let error = JSONRPCErrorError {
+                        code: INVALID_REQUEST_ERROR_CODE,
+                        message: "thread has no persisted rollout".to_string(),
+                        data: None,
+                    };
+                    outgoing.send_error(request_id, error).await;
                     return;
                 };
                 let response = match read_summary_from_rollout(
@@ -1926,29 +1924,29 @@ pub(crate) async fn apply_bespoke_event_handling(
                                 ThreadRollbackResponse { thread }
                             }
                             Err(err) => {
-                                outgoing
-                                    .send_error(
-                                        request_id.clone(),
-                                        internal_error(format!(
-                                            "failed to load rollout `{}`: {err}",
-                                            rollout_path.display()
-                                        )),
-                                    )
-                                    .await;
+                                let error = JSONRPCErrorError {
+                                    code: INTERNAL_ERROR_CODE,
+                                    message: format!(
+                                        "failed to load rollout `{}`: {err}",
+                                        rollout_path.display()
+                                    ),
+                                    data: None,
+                                };
+                                outgoing.send_error(request_id.clone(), error).await;
                                 return;
                             }
                         }
                     }
                     Err(err) => {
-                        outgoing
-                            .send_error(
-                                request_id.clone(),
-                                internal_error(format!(
-                                    "failed to load rollout `{}`: {err}",
-                                    rollout_path.display()
-                                )),
-                            )
-                            .await;
+                        let error = JSONRPCErrorError {
+                            code: INTERNAL_ERROR_CODE,
+                            message: format!(
+                                "failed to load rollout `{}`: {err}",
+                                rollout_path.display()
+                            ),
+                            data: None,
+                        };
+                        outgoing.send_error(request_id.clone(), error).await;
                         return;
                     }
                 };
@@ -1964,20 +1962,6 @@ pub(crate) async fn apply_bespoke_event_handling(
                 };
                 outgoing
                     .send_global_server_notification(ServerNotification::ThreadNameUpdated(
-                        notification,
-                    ))
-                    .await;
-            }
-        }
-        EventMsg::ThreadGoalUpdated(thread_goal_event) => {
-            if let ApiVersion::V2 = api_version {
-                let notification = ThreadGoalUpdatedNotification {
-                    thread_id: thread_goal_event.thread_id.to_string(),
-                    turn_id: thread_goal_event.turn_id,
-                    goal: thread_goal_event.goal.clone().into(),
-                };
-                outgoing
-                    .send_global_server_notification(ServerNotification::ThreadGoalUpdated(
                         notification,
                     ))
                     .await;
@@ -2346,35 +2330,15 @@ async fn handle_thread_rollback_failed(
 
     if let Some(request_id) = pending_rollback {
         outgoing
-            .send_error(request_id, invalid_request(message))
+            .send_error(
+                request_id,
+                JSONRPCErrorError {
+                    code: INVALID_REQUEST_ERROR_CODE,
+                    message: message.clone(),
+                    data: None,
+                },
+            )
             .await;
-    }
-}
-
-async fn respond_to_pending_interrupts(
-    thread_state: &Arc<Mutex<ThreadState>>,
-    outgoing: &ThreadScopedOutgoingMessageSender,
-    abort_reason: Option<codex_protocol::protocol::TurnAbortReason>,
-) {
-    let pending = {
-        let mut state = thread_state.lock().await;
-        std::mem::take(&mut state.pending_interrupts)
-    };
-
-    for (rid, ver) in pending {
-        match ver {
-            ApiVersion::V1 => {
-                let Some(abort_reason) = abort_reason.clone() else {
-                    debug_assert!(false, "v1 interrupts only resolve from TurnAborted");
-                    continue;
-                };
-                let response = InterruptConversationResponse { abort_reason };
-                outgoing.send_response(rid, response).await;
-            }
-            ApiVersion::V2 => {
-                outgoing.send_response(rid, TurnInterruptResponse {}).await;
-            }
-        }
     }
 }
 
@@ -3286,7 +3250,6 @@ mod tests {
                 self.outgoing.clone(),
                 self.thread_state.clone(),
                 self.thread_watch_manager.clone(),
-                Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
                 ApiVersion::V2,
                 "test-provider".to_string(),
                 &self.codex_home,
@@ -3436,10 +3399,7 @@ mod tests {
         let conversation_id = ThreadId::new();
         let thread_state = new_thread_state();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -3508,10 +3468,7 @@ mod tests {
         let conversation_id = ThreadId::new();
         let thread_state = new_thread_state();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -3597,19 +3554,11 @@ mod tests {
             thread_id: conversation_id,
             thread: conversation,
             ..
-        } = thread_manager
-            .start_thread(
-                config.clone(),
-                codex_core::thread_store_from_config(&config),
-            )
-            .await?;
+        } = thread_manager.start_thread(config).await?;
         let thread_state = new_thread_state();
         let thread_watch_manager = ThreadWatchManager::new();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4030,7 +3979,7 @@ mod tests {
             file_system: Some(CoreFileSystemPermissions {
                 entries: vec![FileSystemSandboxEntry {
                     path: FileSystemPath::Special {
-                        value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
+                        value: FileSystemSpecialPath::CurrentWorkingDirectory,
                     },
                     access: FileSystemAccessMode::Write,
                 }],
@@ -4076,7 +4025,7 @@ mod tests {
             file_system: Some(CoreFileSystemPermissions {
                 entries: vec![FileSystemSandboxEntry {
                     path: FileSystemPath::Special {
-                        value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
+                        value: FileSystemSpecialPath::CurrentWorkingDirectory,
                     },
                     access: FileSystemAccessMode::Write,
                 }],
@@ -4126,8 +4075,7 @@ mod tests {
                             "path": {
                                 "type": "special",
                                 "value": {
-                                    "kind": "project_roots",
-                                    "subpath": null
+                                    "kind": "current_working_directory"
                                 }
                             },
                             "access": "write"
@@ -4235,10 +4183,7 @@ mod tests {
         let conversation_id = ThreadId::new();
         let event_turn_id = "complete1".to_string();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4247,19 +4192,17 @@ mod tests {
         let thread_state = new_thread_state();
         {
             let mut state = thread_state.lock().await;
-            state.track_current_turn_event(
-                &event_turn_id,
-                &EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
+            state.track_current_turn_event(&EventMsg::TurnStarted(
+                codex_protocol::protocol::TurnStartedEvent {
                     turn_id: event_turn_id.clone(),
                     started_at: Some(42),
                     model_context_window: None,
                     collaboration_mode_kind: Default::default(),
-                }),
-            );
-            state.track_current_turn_event(
+                },
+            ));
+            state.track_current_turn_event(&EventMsg::TurnComplete(turn_complete_event(
                 &event_turn_id,
-                &EventMsg::TurnComplete(turn_complete_event(&event_turn_id)),
-            );
+            )));
         }
 
         handle_turn_complete(
@@ -4304,10 +4247,7 @@ mod tests {
         )
         .await;
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4355,10 +4295,7 @@ mod tests {
         )
         .await;
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4400,10 +4337,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_turn_plan_update_emits_notification_for_v2() -> Result<()> {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4457,10 +4391,7 @@ mod tests {
         let conversation_id = ThreadId::new();
         let turn_id = "turn-123".to_string();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4549,10 +4480,7 @@ mod tests {
         let conversation_id = ThreadId::new();
         let turn_id = "turn-456".to_string();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4625,10 +4553,7 @@ mod tests {
         let thread_state = new_thread_state();
 
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4890,10 +4815,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_turn_diff_emits_v2_notification() -> Result<()> {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4931,10 +4853,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_turn_diff_is_noop_for_v1() -> Result<()> {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
             vec![ConnectionId(1)],
@@ -4960,10 +4879,7 @@ mod tests {
     #[tokio::test]
     async fn test_hook_prompt_raw_response_emits_item_completed() -> Result<()> {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(
-            tx,
-            codex_analytics::AnalyticsEventsClient::disabled(),
-        ));
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
         let conversation_id = ThreadId::new();
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,

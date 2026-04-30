@@ -9,7 +9,6 @@ use codex_analytics::GuardianReviewAnalyticsResult;
 use codex_analytics::GuardianReviewSessionKind;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
-use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::AskForApproval;
@@ -149,6 +148,8 @@ struct GuardianReviewSessionReuseKey {
     mcp_servers: Constrained<HashMap<String, McpServerConfig>>,
     codex_linux_sandbox_exe: Option<PathBuf>,
     main_execve_wrapper_exe: Option<PathBuf>,
+    js_repl_node_path: Option<PathBuf>,
+    js_repl_node_module_dirs: Vec<PathBuf>,
     zsh_path: Option<PathBuf>,
     features: ManagedFeatures,
     include_apply_patch_tool: bool,
@@ -174,6 +175,8 @@ impl GuardianReviewSessionReuseKey {
             mcp_servers: spawn_config.mcp_servers.clone(),
             codex_linux_sandbox_exe: spawn_config.codex_linux_sandbox_exe.clone(),
             main_execve_wrapper_exe: spawn_config.main_execve_wrapper_exe.clone(),
+            js_repl_node_path: spawn_config.js_repl_node_path.clone(),
+            js_repl_node_module_dirs: spawn_config.js_repl_node_module_dirs.clone(),
             zsh_path: spawn_config.zsh_path.clone(),
             features: spawn_config.features.clone(),
             include_apply_patch_tool: spawn_config.include_apply_patch_tool,
@@ -259,18 +262,6 @@ impl Drop for EphemeralReviewCleanup {
 }
 
 impl GuardianReviewSessionManager {
-    pub(crate) async fn trunk_rollout_path(&self) -> Option<PathBuf> {
-        let trunk = self.state.lock().await.trunk.clone()?;
-        trunk.codex.session.ensure_rollout_materialized().await;
-        match trunk.codex.session.current_rollout_path().await {
-            Ok(path) => path,
-            Err(err) => {
-                warn!("failed to resolve guardian trunk rollout path: {err}");
-                None
-            }
-        }
-    }
-
     pub(crate) async fn shutdown(&self) {
         let (review_session, ephemeral_reviews) = {
             let mut state = self.state.lock().await;
@@ -856,16 +847,8 @@ pub(crate) fn build_guardian_review_session_config(
     );
     guardian_config.developer_instructions = None;
     guardian_config.permissions.approval_policy = Constrained::allow_only(AskForApproval::Never);
-    let sandbox_policy = SandboxPolicy::new_read_only_policy();
-    guardian_config.permissions.permission_profile = Constrained::allow_only(
-        PermissionProfile::from_legacy_sandbox_policy(&sandbox_policy),
-    );
-    guardian_config
-        .permissions
-        .set_legacy_sandbox_policy(sandbox_policy, guardian_config.cwd.as_path())
-        .map_err(|err| {
-            anyhow::anyhow!("guardian review session could not set sandbox policy: {err}")
-        })?;
+    guardian_config.permissions.sandbox_policy =
+        Constrained::allow_only(SandboxPolicy::new_read_only_policy());
     guardian_config.include_apps_instructions = false;
     guardian_config
         .mcp_servers
@@ -885,7 +868,7 @@ pub(crate) fn build_guardian_review_session_config(
         guardian_config.permissions.network = Some(NetworkProxySpec::from_config_and_constraints(
             live_network_config,
             network_constraints,
-            guardian_config.permissions.permission_profile.get(),
+            &SandboxPolicy::new_read_only_policy(),
         )?);
     }
     for feature in [

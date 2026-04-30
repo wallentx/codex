@@ -19,7 +19,6 @@ use crate::session::session::Session;
 use crate::session::turn::build_prompt;
 use crate::session::turn::built_tools;
 use crate::thread_manager::ThreadManager;
-use crate::thread_manager::thread_store_from_config;
 
 /// Build the model-visible `input` list for a single debug turn.
 #[doc(hidden)]
@@ -30,7 +29,7 @@ pub async fn build_prompt_input(
     config.ephemeral = true;
 
     let auth_manager =
-        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false);
 
     let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
         config.codex_self_exe.clone(),
@@ -46,11 +45,12 @@ pub async fn build_prompt_input(
                 .features
                 .enabled(Feature::DefaultModeRequestUserInput),
         },
-        Arc::new(EnvironmentManager::new(EnvironmentManagerArgs::new(local_runtime_paths)).await),
+        Arc::new(EnvironmentManager::new(EnvironmentManagerArgs::from_env(
+            local_runtime_paths,
+        ))),
         /*analytics_events_client*/ None,
     );
-    let thread_store = thread_store_from_config(&config);
-    let thread = thread_manager.start_thread(config, thread_store).await?;
+    let thread = thread_manager.start_thread(config).await?;
 
     let output = build_prompt_input_from_session(thread.thread.codex.session.as_ref(), input).await;
     let shutdown = thread.thread.shutdown_and_wait().await;
