@@ -233,7 +233,7 @@ impl Session {
             &turn_context.approval_policy,
             turn_context.sub_id.clone(),
             self.get_tx_event(),
-            turn_context.permission_profile(),
+            turn_context.sandbox_policy.get().clone(),
             McpRuntimeEnvironment::new(
                 turn_context
                     .environment
@@ -255,11 +255,8 @@ impl Session {
             *guard = cancel_token;
         }
 
-        let mut old_manager = {
-            let mut manager = self.services.mcp_connection_manager.write().await;
-            std::mem::replace(&mut *manager, refreshed_manager)
-        };
-        old_manager.shutdown().await;
+        let mut manager = self.services.mcp_connection_manager.write().await;
+        *manager = refreshed_manager;
     }
 
     pub(crate) async fn refresh_mcp_servers_if_requested(&self, turn_context: &TurnContext) {
