@@ -7,7 +7,6 @@ use crate::config::Config;
 use crate::config::ConfigBuilder;
 use crate::context::ContextualUserFragment;
 use crate::context::SubagentNotification;
-use crate::thread_manager::thread_store_from_config;
 use assert_matches::assert_matches;
 use codex_features::Feature;
 use codex_login::CodexAuth;
@@ -67,6 +66,7 @@ fn assistant_message(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
         content: vec![ContentItem::OutputText {
             text: text.to_string(),
         }],
+        end_turn: None,
         phase,
     }
 }
@@ -109,7 +109,7 @@ impl AgentControlHarness {
     async fn start_thread(&self) -> (ThreadId, Arc<CodexThread>) {
         let new_thread = self
             .manager
-            .start_thread(self.config.clone(), thread_store_from_config(&self.config))
+            .start_thread(self.config.clone())
             .await
             .expect("start thread");
         (new_thread.thread_id, new_thread.thread)
@@ -519,6 +519,7 @@ async fn append_message_records_assistant_message() {
                 content: vec![ContentItem::InputText {
                     text: message.to_string(),
                 }],
+                end_turn: None,
                 phase: None,
             },
         )
@@ -596,28 +597,7 @@ async fn spawn_agent_creates_thread_and_sends_prompt() {
 #[tokio::test]
 async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     let harness = AgentControlHarness::new().await;
-    let mut parent_config = harness.config.clone();
-    let _ = parent_config.features.enable(Feature::MultiAgentV2);
-    parent_config.multi_agent_v2.root_agent_usage_hint_text =
-        Some("Parent root guidance.".to_string());
-    parent_config.multi_agent_v2.subagent_usage_hint_text =
-        Some("Parent subagent guidance.".to_string());
-    let mut child_config = harness.config.clone();
-    let _ = child_config.features.enable(Feature::MultiAgentV2);
-    child_config.multi_agent_v2.root_agent_usage_hint_text =
-        Some("Child root guidance.".to_string());
-    child_config.multi_agent_v2.subagent_usage_hint_text =
-        Some("Child subagent guidance.".to_string());
-    let new_thread = harness
-        .manager
-        .start_thread(
-            parent_config.clone(),
-            thread_store_from_config(&parent_config),
-        )
-        .await
-        .expect("start parent thread");
-    let parent_thread_id = new_thread.thread_id;
-    let parent_thread = new_thread.thread;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
     parent_thread
         .inject_user_message_without_turn("parent seed context".to_string())
         .await;
@@ -636,22 +616,6 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .record_conversation_items(
             turn_context.as_ref(),
             &[
-                ResponseItem::Message {
-                    id: None,
-                    role: "developer".to_string(),
-                    content: vec![ContentItem::InputText {
-                        text: "Parent root guidance.".to_string(),
-                    }],
-                    phase: None,
-                },
-                ResponseItem::Message {
-                    id: None,
-                    role: "developer".to_string(),
-                    content: vec![ContentItem::InputText {
-                        text: "Parent subagent guidance.".to_string(),
-                    }],
-                    phase: None,
-                },
                 assistant_message("parent commentary", Some(MessagePhase::Commentary)),
                 assistant_message("parent final answer", Some(MessagePhase::FinalAnswer)),
                 assistant_message("parent unknown phase", /*phase*/ None),
@@ -681,7 +645,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     let child_thread_id = harness
         .control
         .spawn_agent_with_metadata(
-            child_config,
+            harness.config.clone(),
             text_input("child task"),
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
@@ -714,6 +678,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             content: vec![ContentItem::InputText {
                 text: "parent seed context".to_string(),
             }],
+            end_turn: None,
             phase: None,
         },
         assistant_message("parent final answer", Some(MessagePhase::FinalAnswer)),
@@ -956,7 +921,7 @@ async fn spawn_agent_respects_max_threads_limit() {
     let control = manager.agent_control();
 
     let _ = manager
-        .start_thread(config.clone(), thread_store_from_config(&config))
+        .start_thread(config.clone())
         .await
         .expect("start thread");
 
@@ -1313,10 +1278,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
     let _ = tester_config.features.enable(Feature::MultiAgentV2);
     let tester_thread_id = harness
         .manager
-        .start_thread(
-            tester_config.clone(),
-            thread_store_from_config(&tester_config),
-        )
+        .start_thread(tester_config)
         .await
         .expect("tester thread should start")
         .thread_id;
