@@ -15,14 +15,8 @@ use super::protocol::ClientId;
 use super::protocol::RemoteControlTarget;
 use super::protocol::ServerEnvelope;
 use super::protocol::StreamId;
-use super::segment::ClientSegmentObservation;
-use super::segment::ClientSegmentReassembler;
-use super::segment::REMOTE_CONTROL_SEGMENT_MAX_BYTES;
-use super::segment::split_server_envelope_for_transport;
 use axum::http::HeaderValue;
 use base64::Engine;
-use codex_app_server_protocol::RemoteControlConnectionStatus;
-use codex_app_server_protocol::RemoteControlStatusChangedNotification;
 use codex_core::util::backoff;
 use codex_login::AuthManager;
 use codex_login::UnauthorizedRecovery;
@@ -53,7 +47,7 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-pub(super) const REMOTE_CONTROL_PROTOCOL_VERSION: &str = "3";
+pub(super) const REMOTE_CONTROL_PROTOCOL_VERSION: &str = "2";
 pub(super) const REMOTE_CONTROL_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 const REMOTE_CONTROL_SUBSCRIBE_CURSOR_HEADER: &str = "x-codex-subscribe-cursor";
 const REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL: std::time::Duration =
@@ -89,29 +83,17 @@ impl BoundedOutboundBuffer {
         self.used_tx.send_modify(|used| *used += 1);
     }
 
-    fn ack(
-        &mut self,
-        client_id: &ClientId,
-        stream_id: &StreamId,
-        acked_seq_id: u64,
-        acked_segment_id: Option<usize>,
-    ) {
+    fn ack(&mut self, client_id: &ClientId, stream_id: &StreamId, acked_seq_id: u64) {
         let key = (client_id.clone(), stream_id.clone());
         let Some(buffer) = self.buffer_by_stream.get_mut(&key) else {
             return;
         };
-        let acked_cursor = (acked_seq_id, acked_segment_id.unwrap_or(usize::MAX));
-        buffer.retain(|server_envelope| {
-            let envelope_cursor = (
-                server_envelope.seq_id,
-                server_envelope.event.segment_id().unwrap_or_default(),
-            );
-            let is_acked = envelope_cursor <= acked_cursor;
-            if is_acked {
-                self.used_tx.send_modify(|used| *used -= 1);
-            }
-            !is_acked
-        });
+        while let Some(server_envelope) = buffer.front()
+            && server_envelope.seq_id <= acked_seq_id
+        {
+            buffer.pop_front();
+            self.used_tx.send_modify(|used| *used -= 1);
+        }
         if buffer.is_empty() {
             self.buffer_by_stream.remove(&key);
         }
@@ -128,88 +110,6 @@ struct WebsocketState {
     outbound_buffer: BoundedOutboundBuffer,
     subscribe_cursor: Option<String>,
     next_seq_id_by_stream: HashMap<(ClientId, StreamId), u64>,
-    last_completed_client_chunk_seq_id_by_stream: HashMap<(ClientId, Option<StreamId>), u64>,
-    client_segment_reassembler: ClientSegmentReassembler,
-}
-
-impl WebsocketState {
-    fn observe_client_message(
-        &mut self,
-        client_envelope: ClientEnvelope,
-        wire_size_bytes: usize,
-    ) -> ClientSegmentObservation {
-        let client_message_key = Self::client_message_key(&client_envelope);
-        if let Some((key, seq_id)) = client_message_key.as_ref()
-            && self
-                .last_completed_client_chunk_seq_id_by_stream
-                .get(key)
-                .is_some_and(|last_seq_id| last_seq_id >= seq_id)
-        {
-            return ClientSegmentObservation::Dropped;
-        }
-        if let (
-            Some((_, seq_id)),
-            Some(stream_id),
-            ClientEvent::ClientMessageChunk { segment_id, .. },
-        ) = (
-            client_message_key.as_ref(),
-            client_envelope.stream_id.as_ref(),
-            &client_envelope.event,
-        ) && self.client_segment_reassembler.should_ignore_chunk(
-            &client_envelope.client_id,
-            stream_id,
-            *seq_id,
-            *segment_id,
-        ) {
-            return ClientSegmentObservation::Dropped;
-        }
-        if client_message_key.is_some() && wire_size_bytes > REMOTE_CONTROL_SEGMENT_MAX_BYTES {
-            warn!(
-                client_id = client_envelope.client_id.0.as_str(),
-                "dropping oversized segmented remote-control client envelope"
-            );
-            if let Some(stream_id) = client_envelope.stream_id.as_ref() {
-                self.client_segment_reassembler
-                    .invalidate_stream(&client_envelope.client_id, stream_id);
-            }
-            return ClientSegmentObservation::Dropped;
-        }
-
-        let observation = self.client_segment_reassembler.observe(client_envelope);
-        if matches!(observation, ClientSegmentObservation::Forward(_))
-            && let Some((key, seq_id)) = client_message_key
-        {
-            self.last_completed_client_chunk_seq_id_by_stream
-                .insert(key, seq_id);
-        }
-        observation
-    }
-
-    fn invalidate_client_message_stream(&mut self, client_id: &ClientId, stream_id: &StreamId) {
-        self.last_completed_client_chunk_seq_id_by_stream
-            .remove(&(client_id.clone(), Some(stream_id.clone())));
-    }
-
-    fn invalidate_client_message_client(&mut self, client_id: &ClientId) {
-        self.last_completed_client_chunk_seq_id_by_stream
-            .retain(|(cursor_client_id, _), _| cursor_client_id != client_id);
-    }
-
-    fn client_message_key(
-        client_envelope: &ClientEnvelope,
-    ) -> Option<((ClientId, Option<StreamId>), u64)> {
-        let seq_id = match (&client_envelope.event, client_envelope.seq_id) {
-            (ClientEvent::ClientMessageChunk { .. }, Some(seq_id)) => seq_id,
-            _ => return None,
-        };
-        Some((
-            (
-                client_envelope.client_id.clone(),
-                client_envelope.stream_id.clone(),
-            ),
-            seq_id,
-        ))
-    }
 }
 
 pub(crate) struct RemoteControlWebsocket {
@@ -217,7 +117,6 @@ pub(crate) struct RemoteControlWebsocket {
     remote_control_target: Option<RemoteControlTarget>,
     state_db: Option<Arc<StateRuntime>>,
     auth_manager: Arc<AuthManager>,
-    status_publisher: RemoteControlStatusPublisher,
     shutdown_token: CancellationToken,
     reconnect_attempt: u64,
     enrollment: Option<RemoteControlEnrollment>,
@@ -235,82 +134,20 @@ enum ConnectOutcome {
     Shutdown,
 }
 
-pub(super) struct RemoteControlChannels {
-    pub(super) transport_event_tx: mpsc::Sender<TransportEvent>,
-    pub(super) status_publisher: RemoteControlStatusPublisher,
-}
-
-#[derive(Clone)]
-pub(super) struct RemoteControlStatusPublisher {
-    tx: watch::Sender<RemoteControlStatusChangedNotification>,
-}
-
-impl RemoteControlStatusPublisher {
-    pub(super) fn new(tx: watch::Sender<RemoteControlStatusChangedNotification>) -> Self {
-        Self { tx }
-    }
-
-    fn publish_status(&self, connection_status: RemoteControlConnectionStatus) {
-        self.tx.send_if_modified(|status| {
-            let next_status = RemoteControlStatusChangedNotification {
-                status: connection_status,
-                environment_id: if connection_status == RemoteControlConnectionStatus::Disabled {
-                    None
-                } else {
-                    status.environment_id.clone()
-                },
-            };
-            if *status == next_status {
-                return false;
-            }
-
-            *status = next_status;
-            true
-        });
-    }
-
-    fn publish_environment_id(&self, environment_id: Option<String>) {
-        self.tx.send_if_modified(|status| {
-            if status.status == RemoteControlConnectionStatus::Disabled {
-                return false;
-            }
-            let next_status = RemoteControlStatusChangedNotification {
-                status: status.status,
-                environment_id,
-            };
-            if *status == next_status {
-                return false;
-            }
-
-            *status = next_status;
-            true
-        });
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct RemoteControlConnectOptions<'a> {
-    subscribe_cursor: Option<&'a str>,
-    app_server_client_name: Option<&'a str>,
-}
-
 impl RemoteControlWebsocket {
     pub(crate) fn new(
         remote_control_url: String,
         remote_control_target: Option<RemoteControlTarget>,
         state_db: Option<Arc<StateRuntime>>,
         auth_manager: Arc<AuthManager>,
-        channels: RemoteControlChannels,
+        transport_event_tx: mpsc::Sender<TransportEvent>,
         shutdown_token: CancellationToken,
         enabled_rx: watch::Receiver<bool>,
     ) -> Self {
         let shutdown_token = shutdown_token.child_token();
         let (server_event_tx, server_event_rx) = mpsc::channel(super::CHANNEL_CAPACITY);
-        let client_tracker = ClientTracker::new(
-            server_event_tx,
-            channels.transport_event_tx,
-            &shutdown_token,
-        );
+        let client_tracker =
+            ClientTracker::new(server_event_tx, transport_event_tx, &shutdown_token);
         let (outbound_buffer, used_rx) = BoundedOutboundBuffer::new();
         let auth_recovery = auth_manager.unauthorized_recovery();
 
@@ -319,7 +156,6 @@ impl RemoteControlWebsocket {
             remote_control_target,
             state_db,
             auth_manager,
-            status_publisher: channels.status_publisher,
             shutdown_token,
             reconnect_attempt: 0,
             enrollment: None,
@@ -329,8 +165,6 @@ impl RemoteControlWebsocket {
                 outbound_buffer,
                 subscribe_cursor: None,
                 next_seq_id_by_stream: HashMap::new(),
-                last_completed_client_chunk_seq_id_by_stream: HashMap::new(),
-                client_segment_reassembler: ClientSegmentReassembler::default(),
             })),
             server_event_rx: Arc::new(Mutex::new(server_event_rx)),
             used_rx,
@@ -368,11 +202,7 @@ impl RemoteControlWebsocket {
                 .await
             {
                 ConnectOutcome::Connected(websocket_connection) => *websocket_connection,
-                ConnectOutcome::Disabled => {
-                    self.status_publisher
-                        .publish_status(RemoteControlConnectionStatus::Disabled);
-                    continue;
-                }
+                ConnectOutcome::Disabled => continue,
                 ConnectOutcome::Shutdown => break,
             };
 
@@ -413,8 +243,6 @@ impl RemoteControlWebsocket {
         shutdown_token: &CancellationToken,
         app_server_client_name: Option<&str>,
     ) -> ConnectOutcome {
-        self.status_publisher
-            .publish_status(RemoteControlConnectionStatus::Connecting);
         let remote_control_target = match self.remote_control_target.as_ref() {
             Some(remote_control_target) => remote_control_target.clone(),
             None => match super::protocol::normalize_remote_control_url(&self.remote_control_url) {
@@ -423,8 +251,6 @@ impl RemoteControlWebsocket {
                     remote_control_target
                 }
                 Err(err) => {
-                    self.status_publisher
-                        .publish_status(RemoteControlConnectionStatus::Errored);
                     warn!("remote control is enabled but the URL is invalid: {err}");
                     tokio::select! {
                         _ = shutdown_token.cancelled() => return ConnectOutcome::Shutdown,
@@ -441,10 +267,6 @@ impl RemoteControlWebsocket {
 
         loop {
             let subscribe_cursor = self.state.lock().await.subscribe_cursor.clone();
-            let connect_options = RemoteControlConnectOptions {
-                subscribe_cursor: subscribe_cursor.as_deref(),
-                app_server_client_name,
-            };
             let connect_result = tokio::select! {
                 _ = shutdown_token.cancelled() => return ConnectOutcome::Shutdown,
                 changed = self.enabled_rx.wait_for(|enabled| !*enabled) => {
@@ -459,20 +281,15 @@ impl RemoteControlWebsocket {
                     &self.auth_manager,
                     &mut self.auth_recovery,
                     &mut self.enrollment,
-                    connect_options,
-                    &self.status_publisher,
+                    subscribe_cursor.as_deref(),
+                    app_server_client_name,
                 ) => connect_result,
             };
 
             match connect_result {
                 Ok((websocket_connection, response)) => {
-                    if !*self.enabled_rx.borrow() {
-                        return ConnectOutcome::Disabled;
-                    }
                     self.reconnect_attempt = 0;
                     self.auth_recovery = self.auth_manager.unauthorized_recovery();
-                    self.status_publisher
-                        .publish_status(RemoteControlConnectionStatus::Connected);
                     info!(
                         "connected to app-server remote control websocket: {}, {}",
                         remote_control_target.websocket_url,
@@ -481,14 +298,9 @@ impl RemoteControlWebsocket {
                     return ConnectOutcome::Connected(Box::new(websocket_connection));
                 }
                 Err(err) => {
-                    if !*self.enabled_rx.borrow() {
-                        return ConnectOutcome::Disabled;
-                    }
                     let reconnect_delay = if err.kind() == ErrorKind::WouldBlock {
                         REMOTE_CONTROL_ACCOUNT_ID_RETRY_INTERVAL
                     } else {
-                        self.status_publisher
-                            .publish_status(RemoteControlConnectionStatus::Errored);
                         warn!(
                             "failed to connect to app-server remote control websocket: {}, err: {}",
                             remote_control_target.websocket_url, err
@@ -539,15 +351,9 @@ impl RemoteControlWebsocket {
         let mut enabled_rx = self.enabled_rx.clone();
         tokio::select! {
             _ = shutdown_token.cancelled() => {}
-            changed = enabled_rx.wait_for(|enabled| !*enabled) => {
-                if changed.is_ok() {
-                    self.status_publisher
-                        .publish_status(RemoteControlConnectionStatus::Disabled);
-                }
-            }
-            _ = join_set.join_next() => {}
-        };
-        shutdown_token.cancel();
+            _ = enabled_rx.wait_for(|enabled| !*enabled) => shutdown_token.cancel(),
+            _ = join_set.join_next() => shutdown_token.cancel(),
+        }
 
         join_set.join_all().await;
     }
@@ -656,7 +462,7 @@ impl RemoteControlWebsocket {
                     }
                 }
             };
-            let (payloads, write_complete_tx) = {
+            let (payload, write_complete_tx) = {
                 let mut state = state.lock().await;
                 let seq_key = (
                     queued_server_envelope.client_id.clone(),
@@ -673,42 +479,29 @@ impl RemoteControlWebsocket {
                     seq_id,
                     stream_id: queued_server_envelope.stream_id,
                 };
-                let server_envelopes = match split_server_envelope_for_transport(server_envelope) {
-                    Ok(server_envelopes) => server_envelopes,
+                let payload = match serde_json::to_string(&server_envelope) {
+                    Ok(payload) => payload,
                     Err(err) => {
-                        error!("failed to split remote-control server event: {err}");
+                        error!("failed to serialize remote-control server event: {err}");
                         continue;
                     }
                 };
-                let mut payloads = Vec::with_capacity(server_envelopes.len());
-                for server_envelope in server_envelopes {
-                    let payload = match serde_json::to_string(&server_envelope) {
-                        Ok(payload) => payload,
-                        Err(err) => {
-                            error!("failed to serialize remote-control server event: {err}");
-                            continue;
-                        }
-                    };
-                    state.outbound_buffer.insert(&server_envelope);
-                    payloads.push(payload);
-                }
                 state
                     .next_seq_id_by_stream
                     .insert(seq_key, seq_id.saturating_add(1));
+                state.outbound_buffer.insert(&server_envelope);
 
-                (payloads, queued_server_envelope.write_complete_tx)
+                (payload, queued_server_envelope.write_complete_tx)
             };
 
-            for payload in payloads {
-                tokio::select! {
-                    _ = shutdown_token.cancelled() => return Ok(()),
-                    send_result = websocket_writer.send(tungstenite::Message::Text(payload.into())) => {
-                        if let Err(err) = send_result {
-                            return Err(io::Error::other(err));
-                        }
+            tokio::select! {
+                _ = shutdown_token.cancelled() => return Ok(()),
+                send_result = websocket_writer.send(tungstenite::Message::Text(payload.into())) => {
+                    if let Err(err) = send_result {
+                        return Err(io::Error::other(err));
                     }
                 }
-            }
+            };
             if let Some(write_complete_tx) = write_complete_tx {
                 let _ = write_complete_tx.send(());
             }
@@ -770,30 +563,11 @@ impl RemoteControlWebsocket {
                     if client_tracker.close_client(&client_key).await.is_err() {
                         return Ok(());
                     }
-                    state
-                        .lock()
-                        .await
-                        .client_segment_reassembler
-                        .invalidate_stream(&client_key.0, &client_key.1);
-                    state
-                        .lock()
-                        .await
-                        .invalidate_client_message_stream(&client_key.0, &client_key.1);
                     continue;
                 }
                 _ = idle_sweep_interval.tick() => {
-                    match client_tracker.close_expired_clients().await {
-                        Ok(client_keys) => {
-                            let mut websocket_state = state.lock().await;
-                            for (client_id, stream_id) in client_keys {
-                                websocket_state
-                                    .client_segment_reassembler
-                                    .invalidate_stream(&client_id, &stream_id);
-                                websocket_state
-                                    .invalidate_client_message_stream(&client_id, &stream_id);
-                            }
-                        }
-                        Err(_) => return Ok(()),
+                    if client_tracker.close_expired_clients().await.is_err() {
+                        return Ok(());
                     }
                     continue;
                 }
@@ -804,11 +578,10 @@ impl RemoteControlWebsocket {
                     }
                 }
             };
-            let (client_envelope, wire_size_bytes) = match incoming_message {
+            let client_envelope = match incoming_message {
                 Ok(tungstenite::Message::Text(text)) => {
-                    let wire_size_bytes = text.len();
                     match serde_json::from_str::<ClientEnvelope>(&text) {
-                        Ok(client_envelope) => (client_envelope, wire_size_bytes),
+                        Ok(client_envelope) => client_envelope,
                         Err(err) => {
                             warn!("failed to deserialize remote-control client event: {err}");
                             continue;
@@ -840,21 +613,12 @@ impl RemoteControlWebsocket {
                 }
             };
 
-            let observation = {
-                let mut websocket_state = state.lock().await;
-                websocket_state.observe_client_message(client_envelope, wire_size_bytes)
-            };
-            let client_envelope = match observation {
-                ClientSegmentObservation::Forward(client_envelope) => *client_envelope,
-                ClientSegmentObservation::Pending | ClientSegmentObservation::Dropped => continue,
-            };
-
             {
                 let mut websocket_state = state.lock().await;
                 if let Some(cursor) = client_envelope.cursor.as_deref() {
                     websocket_state.subscribe_cursor = Some(cursor.to_string());
                 }
-                if let ClientEvent::Ack { segment_id } = &client_envelope.event
+                if let ClientEvent::Ack = &client_envelope.event
                     && let Some(acked_seq_id) = client_envelope.seq_id
                     && let Some(stream_id) = client_envelope.stream_id.as_ref()
                 {
@@ -862,38 +626,16 @@ impl RemoteControlWebsocket {
                         &client_envelope.client_id,
                         stream_id,
                         acked_seq_id,
-                        *segment_id,
                     );
                 }
             }
 
-            let closed_client =
-                matches!(&client_envelope.event, ClientEvent::ClientClosed).then(|| {
-                    (
-                        client_envelope.client_id.clone(),
-                        client_envelope.stream_id.clone(),
-                    )
-                });
             if client_tracker
                 .handle_message(client_envelope)
                 .await
                 .is_err()
             {
                 return Ok(());
-            }
-            if let Some((client_id, stream_id)) = closed_client {
-                let mut websocket_state = state.lock().await;
-                if let Some(stream_id) = stream_id {
-                    websocket_state
-                        .client_segment_reassembler
-                        .invalidate_stream(&client_id, &stream_id);
-                    websocket_state.invalidate_client_message_stream(&client_id, &stream_id);
-                } else {
-                    websocket_state
-                        .client_segment_reassembler
-                        .invalidate_client(&client_id);
-                    websocket_state.invalidate_client_message_client(&client_id);
-                }
             }
         }
     }
@@ -964,7 +706,7 @@ pub(crate) async fn load_remote_control_auth(
                     "remote control requires ChatGPT authentication",
                 ));
             }
-            auth_manager.reload().await;
+            auth_manager.reload();
             reloaded = true;
             continue;
         };
@@ -972,7 +714,7 @@ pub(crate) async fn load_remote_control_auth(
             break auth;
         }
         if auth.get_account_id().is_none() && !reloaded {
-            auth_manager.reload().await;
+            auth_manager.reload();
             reloaded = true;
             continue;
         }
@@ -1003,32 +745,15 @@ pub(super) async fn connect_remote_control_websocket(
     auth_manager: &Arc<AuthManager>,
     auth_recovery: &mut UnauthorizedRecovery,
     enrollment: &mut Option<RemoteControlEnrollment>,
-    connect_options: RemoteControlConnectOptions<'_>,
-    status_publisher: &RemoteControlStatusPublisher,
+    subscribe_cursor: Option<&str>,
+    app_server_client_name: Option<&str>,
 ) -> io::Result<(
     WebSocketStream<MaybeTlsStream<TcpStream>>,
     tungstenite::http::Response<()>,
 )> {
     ensure_rustls_crypto_provider();
 
-    let Some(state_db) = state_db else {
-        *enrollment = None;
-        return Err(io::Error::new(
-            ErrorKind::NotFound,
-            "remote control requires sqlite state db",
-        ));
-    };
-
-    let auth = match load_remote_control_auth(auth_manager).await {
-        Ok(auth) => auth,
-        Err(err) => {
-            if err.kind() == ErrorKind::PermissionDenied {
-                *enrollment = None;
-                status_publisher.publish_environment_id(/*environment_id*/ None);
-            }
-            return Err(err);
-        }
-    };
+    let auth = load_remote_control_auth(auth_manager).await?;
     let enrollment_account_id = enrollment.as_ref().map(|enrollment| &enrollment.account_id);
     if enrollment_account_id.is_some_and(|account_id| account_id != &auth.account_id) {
         info!(
@@ -1040,25 +765,16 @@ pub(super) async fn connect_remote_control_websocket(
             auth.account_id
         );
         *enrollment = None;
-        status_publisher.publish_environment_id(/*environment_id*/ None);
-    }
-
-    if let Some(enrollment) = enrollment.as_ref() {
-        status_publisher.publish_environment_id(Some(enrollment.environment_id.clone()));
     }
 
     if enrollment.is_none() {
-        let loaded_enrollment = load_persisted_remote_control_enrollment(
-            Some(state_db),
+        *enrollment = load_persisted_remote_control_enrollment(
+            state_db,
             remote_control_target,
             &auth.account_id,
-            connect_options.app_server_client_name,
+            app_server_client_name,
         )
-        .await?;
-        if let Some(loaded_enrollment) = loaded_enrollment.as_ref() {
-            status_publisher.publish_environment_id(Some(loaded_enrollment.environment_id.clone()));
-        }
-        *enrollment = loaded_enrollment;
+        .await;
     }
 
     if enrollment.is_none() {
@@ -1080,17 +796,15 @@ pub(super) async fn connect_remote_control_websocket(
             Err(err) => return Err(err),
         };
         if let Err(err) = update_persisted_remote_control_enrollment(
-            Some(state_db),
+            state_db,
             remote_control_target,
             &auth.account_id,
-            connect_options.app_server_client_name,
+            app_server_client_name,
             Some(&new_enrollment),
         )
         .await
         {
-            return Err(io::Error::other(format!(
-                "failed to persist remote control enrollment in sqlite state db: {err}"
-            )));
+            warn!("failed to persist remote control enrollment in sqlite state db: {err}");
         }
         info!(
             "created new remote control enrollment: websocket_url={}, account_id={}, server_id={}, environment_id={}",
@@ -1099,7 +813,6 @@ pub(super) async fn connect_remote_control_websocket(
             new_enrollment.server_id,
             new_enrollment.environment_id
         );
-        status_publisher.publish_environment_id(Some(new_enrollment.environment_id.clone()));
         *enrollment = Some(new_enrollment);
     }
 
@@ -1110,7 +823,7 @@ pub(super) async fn connect_remote_control_websocket(
         &remote_control_target.websocket_url,
         enrollment_ref,
         &auth,
-        connect_options.subscribe_cursor,
+        subscribe_cursor,
     )?;
 
     match connect_async(request).await {
@@ -1126,10 +839,10 @@ pub(super) async fn connect_remote_control_websocket(
                         enrollment_ref.environment_id
                     );
                     if let Err(clear_err) = update_persisted_remote_control_enrollment(
-                        Some(state_db),
+                        state_db,
                         remote_control_target,
                         &auth.account_id,
-                        connect_options.app_server_client_name,
+                        app_server_client_name,
                         /*enrollment*/ None,
                     )
                     .await
@@ -1139,7 +852,6 @@ pub(super) async fn connect_remote_control_websocket(
                         );
                     }
                     *enrollment = None;
-                    status_publisher.publish_environment_id(/*environment_id*/ None);
                 }
                 tungstenite::Error::Http(response)
                     if matches!(response.status().as_u16(), 401 | 403) =>
@@ -1216,8 +928,6 @@ mod tests {
     use chrono::Utc;
     use codex_app_server_protocol::AuthMode;
     use codex_app_server_protocol::ConfigWarningNotification;
-    use codex_app_server_protocol::JSONRPCMessage;
-    use codex_app_server_protocol::JSONRPCNotification;
     use codex_app_server_protocol::ServerNotification;
     use codex_config::types::AuthCredentialsStoreMode;
     use codex_core::test_support::auth_manager_from_auth;
@@ -1247,17 +957,6 @@ mod tests {
     const TEST_HTTP_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
     #[cfg(not(windows))]
     const TEST_HTTP_ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
-
-    fn remote_control_status_channel() -> (
-        RemoteControlStatusPublisher,
-        watch::Receiver<RemoteControlStatusChangedNotification>,
-    ) {
-        let (status_tx, status_rx) = watch::channel(RemoteControlStatusChangedNotification {
-            status: RemoteControlConnectionStatus::Connecting,
-            environment_id: None,
-        });
-        (RemoteControlStatusPublisher::new(status_tx), status_rx)
-    }
 
     async fn remote_control_state_runtime(codex_home: &TempDir) -> Arc<StateRuntime> {
         StateRuntime::init(codex_home.path().to_path_buf(), "test-provider".to_string())
@@ -1350,7 +1049,6 @@ mod tests {
             server_id: "srv_e_test".to_string(),
             server_name: "test-server".to_string(),
         });
-        let (status_publisher, status_rx) = remote_control_status_channel();
 
         let err = match connect_remote_control_websocket(
             &remote_control_target,
@@ -1358,11 +1056,8 @@ mod tests {
             &auth_manager,
             &mut auth_recovery,
             &mut enrollment,
-            RemoteControlConnectOptions {
-                subscribe_cursor: None,
-                app_server_client_name: None,
-            },
-            &status_publisher,
+            /*subscribe_cursor*/ None,
+            /*app_server_client_name*/ None,
         )
         .await
         {
@@ -1372,13 +1067,6 @@ mod tests {
 
         server_task.await.expect("server task should succeed");
         assert_eq!(err.to_string(), expected_error);
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Connecting,
-                environment_id: Some("env_test".to_string()),
-            }
-        );
     }
 
     #[tokio::test]
@@ -1402,8 +1090,7 @@ mod tests {
             /*enable_codex_api_key_env*/ false,
             AuthCredentialsStoreMode::File,
             /*chatgpt_base_url*/ None,
-        )
-        .await;
+        );
         let mut auth_recovery = auth_manager.unauthorized_recovery();
         let mut enrollment = Some(RemoteControlEnrollment {
             account_id: "account_id".to_string(),
@@ -1411,7 +1098,6 @@ mod tests {
             server_id: "srv_e_test".to_string(),
             server_name: "test-server".to_string(),
         });
-        let (status_publisher, status_rx) = remote_control_status_channel();
         save_auth(
             codex_home.path(),
             &remote_control_auth_dot_json("fresh-token"),
@@ -1434,23 +1120,13 @@ mod tests {
             &auth_manager,
             &mut auth_recovery,
             &mut enrollment,
-            RemoteControlConnectOptions {
-                subscribe_cursor: None,
-                app_server_client_name: None,
-            },
-            &status_publisher,
+            /*subscribe_cursor*/ None,
+            /*app_server_client_name*/ None,
         )
         .await
         .expect_err("unauthorized response should fail the websocket connect");
 
         server_task.await.expect("server task should succeed");
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Connecting,
-                environment_id: Some("env_test".to_string()),
-            }
-        );
         assert_eq!(
             err.to_string(),
             "remote control websocket auth failed with HTTP 401 Unauthorized; retrying after auth recovery"
@@ -1496,11 +1172,9 @@ mod tests {
             /*enable_codex_api_key_env*/ false,
             AuthCredentialsStoreMode::File,
             /*chatgpt_base_url*/ None,
-        )
-        .await;
+        );
         let mut auth_recovery = auth_manager.unauthorized_recovery();
         let mut enrollment = None;
-        let (status_publisher, status_rx) = remote_control_status_channel();
         save_auth(
             codex_home.path(),
             &remote_control_auth_dot_json("fresh-token"),
@@ -1514,21 +1188,13 @@ mod tests {
             &auth_manager,
             &mut auth_recovery,
             &mut enrollment,
-            RemoteControlConnectOptions {
-                subscribe_cursor: None,
-                app_server_client_name: None,
-            },
-            &status_publisher,
+            /*subscribe_cursor*/ None,
+            /*app_server_client_name*/ None,
         )
         .await
         .expect_err("unauthorized enrollment should fail the websocket connect");
 
         server_task.await.expect("server task should succeed");
-        assert!(
-            !status_rx
-                .has_changed()
-                .expect("remote control status watch should remain open")
-        );
         assert_eq!(
             err.to_string(),
             format!(
@@ -1547,97 +1213,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_remote_control_websocket_requires_sqlite_state_db() {
-        let remote_control_target = normalize_remote_control_url("http://127.0.0.1:9/backend-api/")
-            .expect("target should parse");
-        let auth_manager = remote_control_auth_manager();
-        let mut auth_recovery = auth_manager.unauthorized_recovery();
-        let mut enrollment = Some(RemoteControlEnrollment {
-            account_id: "account_id".to_string(),
-            environment_id: "env_test".to_string(),
-            server_id: "srv_e_test".to_string(),
-            server_name: "test-server".to_string(),
-        });
-        let (status_publisher, _status_rx) = remote_control_status_channel();
-
-        let err = connect_remote_control_websocket(
-            &remote_control_target,
-            /*state_db*/ None,
-            &auth_manager,
-            &mut auth_recovery,
-            &mut enrollment,
-            RemoteControlConnectOptions {
-                subscribe_cursor: None,
-                app_server_client_name: None,
-            },
-            &status_publisher,
-        )
-        .await
-        .expect_err("missing sqlite state db should fail remote control");
-
-        assert_eq!(err.kind(), ErrorKind::NotFound);
-        assert_eq!(err.to_string(), "remote control requires sqlite state db");
-        assert_eq!(enrollment, None);
-    }
-
-    #[tokio::test]
-    async fn connect_remote_control_websocket_requires_chatgpt_auth() {
-        let remote_control_target = normalize_remote_control_url("http://127.0.0.1:9/backend-api/")
-            .expect("target should parse");
-        let codex_home = TempDir::new().expect("temp dir should create");
-        let state_db = remote_control_state_runtime(&codex_home).await;
-        let auth_manager = AuthManager::shared(
-            codex_home.path().to_path_buf(),
-            /*enable_codex_api_key_env*/ false,
-            AuthCredentialsStoreMode::File,
-            /*chatgpt_base_url*/ None,
-        )
-        .await;
-        let mut auth_recovery = auth_manager.unauthorized_recovery();
-        let mut enrollment = Some(RemoteControlEnrollment {
-            account_id: "account_id".to_string(),
-            environment_id: "env_test".to_string(),
-            server_id: "srv_e_test".to_string(),
-            server_name: "test-server".to_string(),
-        });
-        let (status_publisher, mut status_rx) = remote_control_status_channel();
-        status_publisher.publish_environment_id(Some("env_test".to_string()));
-        status_rx
-            .changed()
-            .await
-            .expect("remote control status watch should remain open");
-
-        let err = connect_remote_control_websocket(
-            &remote_control_target,
-            Some(state_db.as_ref()),
-            &auth_manager,
-            &mut auth_recovery,
-            &mut enrollment,
-            RemoteControlConnectOptions {
-                subscribe_cursor: None,
-                app_server_client_name: None,
-            },
-            &status_publisher,
-        )
-        .await
-        .expect_err("missing auth should fail remote control");
-
-        assert_eq!(err.kind(), ErrorKind::PermissionDenied);
-        assert_eq!(
-            err.to_string(),
-            "remote control requires ChatGPT authentication"
-        );
-        assert_eq!(enrollment, None);
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Connecting,
-                environment_id: None,
-            }
-        );
-    }
-
-    #[tokio::test]
     async fn run_remote_control_websocket_loop_shutdown_cancels_reconnect_backoff() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1649,7 +1224,6 @@ mod tests {
             normalize_remote_control_url(&remote_control_url).expect("target should parse");
         let (transport_event_tx, transport_event_rx) = mpsc::channel(1);
         drop(transport_event_rx);
-        let (status_publisher, _status_rx) = remote_control_status_channel();
         let shutdown_token = CancellationToken::new();
         let (_enabled_tx, enabled_rx) = watch::channel(true);
         let websocket_task = tokio::spawn({
@@ -1660,10 +1234,7 @@ mod tests {
                     Some(remote_control_target),
                     /*state_db*/ None,
                     remote_control_auth_manager(),
-                    RemoteControlChannels {
-                        transport_event_tx,
-                        status_publisher,
-                    },
+                    transport_event_tx,
                     shutdown_token,
                     enabled_rx,
                 )
@@ -1682,85 +1253,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_status_if_changed_sends_only_status_changes() {
-        let (status_publisher, mut status_rx) = remote_control_status_channel();
-
-        status_publisher.publish_environment_id(/*environment_id*/ None);
-        assert!(
-            timeout(Duration::from_millis(20), status_rx.changed())
-                .await
-                .is_err()
-        );
-
-        status_publisher.publish_environment_id(Some("env_first".to_string()));
-        status_rx
-            .changed()
-            .await
-            .expect("remote control status watch should remain open");
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Connecting,
-                environment_id: Some("env_first".to_string()),
-            }
-        );
-
-        status_publisher.publish_environment_id(Some("env_first".to_string()));
-        assert!(
-            timeout(Duration::from_millis(20), status_rx.changed())
-                .await
-                .is_err()
-        );
-
-        status_publisher.publish_status(RemoteControlConnectionStatus::Connected);
-        status_rx
-            .changed()
-            .await
-            .expect("remote control status watch should remain open");
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Connected,
-                environment_id: Some("env_first".to_string()),
-            }
-        );
-
-        status_publisher.publish_environment_id(/*environment_id*/ None);
-        status_rx
-            .changed()
-            .await
-            .expect("remote control status watch should remain open");
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Connected,
-                environment_id: None,
-            }
-        );
-
-        status_publisher.publish_environment_id(Some("env_disabled".to_string()));
-        status_publisher.publish_status(RemoteControlConnectionStatus::Disabled);
-        status_rx
-            .changed()
-            .await
-            .expect("remote control status watch should remain open");
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Disabled,
-                environment_id: None,
-            }
-        );
-
-        status_publisher.publish_environment_id(Some("env_disabled".to_string()));
-        assert!(
-            timeout(Duration::from_millis(20), status_rx.changed())
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
     async fn run_server_writer_inner_sends_periodic_ping_frames() {
         let (client_stream, mut server_stream) = connected_websocket_pair().await;
         let (websocket_writer, _websocket_reader) = client_stream.split();
@@ -1769,8 +1261,6 @@ mod tests {
             outbound_buffer,
             subscribe_cursor: None,
             next_seq_id_by_stream: HashMap::new(),
-            last_completed_client_chunk_seq_id_by_stream: HashMap::new(),
-            client_segment_reassembler: ClientSegmentReassembler::default(),
         }));
         let (_server_event_tx, server_event_rx) = mpsc::channel(super::super::CHANNEL_CAPACITY);
         let server_event_rx = Arc::new(Mutex::new(server_event_rx));
@@ -1807,8 +1297,6 @@ mod tests {
             outbound_buffer,
             subscribe_cursor: None,
             next_seq_id_by_stream: HashMap::new(),
-            last_completed_client_chunk_seq_id_by_stream: HashMap::new(),
-            client_segment_reassembler: ClientSegmentReassembler::default(),
         }));
         let (server_event_tx, server_event_rx) = mpsc::channel(super::super::CHANNEL_CAPACITY);
         let server_event_rx = Arc::new(Mutex::new(server_event_rx));
@@ -1886,8 +1374,6 @@ mod tests {
             outbound_buffer,
             subscribe_cursor: None,
             next_seq_id_by_stream: HashMap::new(),
-            last_completed_client_chunk_seq_id_by_stream: HashMap::new(),
-            client_segment_reassembler: ClientSegmentReassembler::default(),
         }));
         let (server_event_tx, _server_event_rx) = mpsc::channel(super::super::CHANNEL_CAPACITY);
         let (transport_event_tx, _transport_event_rx) =
@@ -1943,9 +1429,7 @@ mod tests {
             "first-client-new-stream",
         ));
 
-        outbound_buffer.ack(
-            &client_1, &stream_1, /*acked_seq_id*/ 3, /*acked_segment_id*/ None,
-        );
+        outbound_buffer.ack(&client_1, &stream_1, /*acked_seq_id*/ 3);
 
         let mut retained = outbound_buffer
             .server_envelopes()
@@ -1988,9 +1472,7 @@ mod tests {
             &client_2, "stream-1", /*seq_id*/ 3, "second",
         ));
 
-        outbound_buffer.ack(
-            &client_1, &stream_1, /*acked_seq_id*/ 1, /*acked_segment_id*/ None,
-        );
+        outbound_buffer.ack(&client_1, &stream_1, /*acked_seq_id*/ 1);
 
         let mut retained = outbound_buffer
             .server_envelopes()
@@ -2008,390 +1490,6 @@ mod tests {
             vec![("client-1", "stream-2", 2), ("client-2", "stream-1", 3)]
         );
         assert_eq!(*used_rx.borrow(), 2);
-    }
-
-    #[test]
-    fn outbound_buffer_advances_segmented_acks_by_wire_cursor() {
-        let (mut outbound_buffer, used_rx) = BoundedOutboundBuffer::new();
-        let client_id = ClientId("client-1".to_string());
-        let stream_id = StreamId("stream-1".to_string());
-
-        outbound_buffer.insert(&server_chunk_envelope(
-            &client_id, "stream-1", /*seq_id*/ 4, /*segment_id*/ 0,
-        ));
-        outbound_buffer.insert(&server_chunk_envelope(
-            &client_id, "stream-1", /*seq_id*/ 4, /*segment_id*/ 1,
-        ));
-
-        outbound_buffer.ack(
-            &client_id,
-            &stream_id,
-            /*acked_seq_id*/ 4,
-            /*acked_segment_id*/ Some(1),
-        );
-
-        let retained = outbound_buffer
-            .server_envelopes()
-            .map(|server_envelope| server_envelope.event.segment_id())
-            .collect::<Vec<_>>();
-        assert_eq!(retained, Vec::<Option<usize>>::new());
-        assert_eq!(*used_rx.borrow(), 0);
-    }
-
-    #[test]
-    fn outbound_buffer_treats_segmentless_acks_as_seq_level_acks() {
-        let (mut outbound_buffer, used_rx) = BoundedOutboundBuffer::new();
-        let client_id = ClientId("client-1".to_string());
-        let stream_id = StreamId("stream-1".to_string());
-
-        outbound_buffer.insert(&server_chunk_envelope(
-            &client_id, "stream-1", /*seq_id*/ 4, /*segment_id*/ 0,
-        ));
-        outbound_buffer.insert(&server_chunk_envelope(
-            &client_id, "stream-1", /*seq_id*/ 4, /*segment_id*/ 1,
-        ));
-
-        outbound_buffer.ack(
-            &client_id, &stream_id, /*acked_seq_id*/ 4, /*acked_segment_id*/ None,
-        );
-
-        let retained = outbound_buffer
-            .server_envelopes()
-            .map(|server_envelope| server_envelope.event.segment_id())
-            .collect::<Vec<_>>();
-        assert_eq!(retained, Vec::<Option<usize>>::new());
-        assert_eq!(*used_rx.borrow(), 0);
-    }
-
-    #[test]
-    fn websocket_state_drops_duplicate_client_chunks_while_pending() {
-        let (outbound_buffer, _used_rx) = BoundedOutboundBuffer::new();
-        let mut state = WebsocketState {
-            outbound_buffer,
-            subscribe_cursor: None,
-            next_seq_id_by_stream: HashMap::new(),
-            last_completed_client_chunk_seq_id_by_stream: HashMap::new(),
-            client_segment_reassembler: ClientSegmentReassembler::default(),
-        };
-        let first_chunk = client_chunk_envelope(
-            "client-1", "stream-1", /*seq_id*/ 4, /*segment_id*/ 0,
-            /*segment_count*/ 2, /*message_size_bytes*/ 2, b"x",
-        );
-        let second_chunk = client_chunk_envelope(
-            "client-1", "stream-1", /*seq_id*/ 4, /*segment_id*/ 1,
-            /*segment_count*/ 2, /*message_size_bytes*/ 2, b"y",
-        );
-
-        assert!(matches!(
-            observe_client_message(&mut state, first_chunk.clone()),
-            ClientSegmentObservation::Pending
-        ));
-        assert!(matches!(
-            observe_client_message(&mut state, first_chunk.clone()),
-            ClientSegmentObservation::Dropped
-        ));
-        assert!(matches!(
-            observe_client_message(&mut state, second_chunk),
-            ClientSegmentObservation::Dropped
-        ));
-        assert!(matches!(
-            observe_client_message(&mut state, first_chunk),
-            ClientSegmentObservation::Pending
-        ));
-    }
-
-    #[test]
-    fn websocket_state_drops_replayed_client_chunks_after_completion() {
-        let (outbound_buffer, _used_rx) = BoundedOutboundBuffer::new();
-        let mut state = WebsocketState {
-            outbound_buffer,
-            subscribe_cursor: None,
-            next_seq_id_by_stream: HashMap::new(),
-            last_completed_client_chunk_seq_id_by_stream: HashMap::new(),
-            client_segment_reassembler: ClientSegmentReassembler::default(),
-        };
-        let message = JSONRPCMessage::Notification(JSONRPCNotification {
-            method: "initialized".to_string(),
-            params: None,
-        });
-        let raw = serde_json::to_vec(&message).expect("message should serialize");
-        let split = raw.len() / 2;
-        let first_chunk = client_chunk_envelope(
-            "client-1",
-            "stream-1",
-            /*seq_id*/ 4,
-            /*segment_id*/ 0,
-            /*segment_count*/ 2,
-            raw.len(),
-            &raw[..split],
-        );
-        let second_chunk = client_chunk_envelope(
-            "client-1",
-            "stream-1",
-            /*seq_id*/ 4,
-            /*segment_id*/ 1,
-            /*segment_count*/ 2,
-            raw.len(),
-            &raw[split..],
-        );
-
-        assert!(matches!(
-            observe_client_message(&mut state, first_chunk.clone()),
-            ClientSegmentObservation::Pending
-        ));
-        assert!(matches!(
-            observe_client_message(&mut state, second_chunk),
-            ClientSegmentObservation::Forward(_)
-        ));
-        assert!(matches!(
-            observe_client_message(&mut state, first_chunk),
-            ClientSegmentObservation::Dropped
-        ));
-    }
-
-    #[test]
-    fn websocket_state_allows_replay_after_rejected_out_of_order_chunk() {
-        let (outbound_buffer, _used_rx) = BoundedOutboundBuffer::new();
-        let mut state = WebsocketState {
-            outbound_buffer,
-            subscribe_cursor: None,
-            next_seq_id_by_stream: HashMap::new(),
-            last_completed_client_chunk_seq_id_by_stream: HashMap::new(),
-            client_segment_reassembler: ClientSegmentReassembler::default(),
-        };
-        let first_chunk = client_chunk_envelope(
-            "client-1", "stream-1", /*seq_id*/ 4, /*segment_id*/ 0,
-            /*segment_count*/ 2, /*message_size_bytes*/ 2, b"x",
-        );
-        let second_chunk = client_chunk_envelope(
-            "client-1", "stream-1", /*seq_id*/ 4, /*segment_id*/ 1,
-            /*segment_count*/ 2, /*message_size_bytes*/ 2, b"y",
-        );
-
-        assert!(matches!(
-            observe_client_message(&mut state, second_chunk),
-            ClientSegmentObservation::Dropped
-        ));
-        assert!(matches!(
-            observe_client_message(&mut state, first_chunk),
-            ClientSegmentObservation::Pending
-        ));
-    }
-
-    #[test]
-    fn websocket_state_allows_replay_after_later_chunk_drops() {
-        let (outbound_buffer, _used_rx) = BoundedOutboundBuffer::new();
-        let mut state = WebsocketState {
-            outbound_buffer,
-            subscribe_cursor: None,
-            next_seq_id_by_stream: HashMap::new(),
-            last_completed_client_chunk_seq_id_by_stream: HashMap::new(),
-            client_segment_reassembler: ClientSegmentReassembler::default(),
-        };
-        let first_chunk = client_chunk_envelope(
-            "client-1", "stream-1", /*seq_id*/ 4, /*segment_id*/ 0,
-            /*segment_count*/ 2, /*message_size_bytes*/ 2, b"x",
-        );
-        let invalid_second_chunk = client_chunk_envelope(
-            "client-1", "stream-1", /*seq_id*/ 4, /*segment_id*/ 1,
-            /*segment_count*/ 2, /*message_size_bytes*/ 2, b"",
-        );
-
-        assert!(matches!(
-            observe_client_message(&mut state, first_chunk.clone()),
-            ClientSegmentObservation::Pending
-        ));
-        assert!(matches!(
-            observe_client_message(&mut state, invalid_second_chunk),
-            ClientSegmentObservation::Dropped
-        ));
-        assert!(matches!(
-            observe_client_message(&mut state, first_chunk),
-            ClientSegmentObservation::Pending
-        ));
-    }
-
-    #[test]
-    fn websocket_state_drops_oversized_client_chunk_frames() {
-        let (outbound_buffer, _used_rx) = BoundedOutboundBuffer::new();
-        let mut state = WebsocketState {
-            outbound_buffer,
-            subscribe_cursor: None,
-            next_seq_id_by_stream: HashMap::new(),
-            last_completed_client_chunk_seq_id_by_stream: HashMap::new(),
-            client_segment_reassembler: ClientSegmentReassembler::default(),
-        };
-        let chunk = client_chunk_envelope(
-            "client-1", "stream-1", /*seq_id*/ 4, /*segment_id*/ 0,
-            /*segment_count*/ 1, /*message_size_bytes*/ 1, b"x",
-        );
-
-        assert!(matches!(
-            state.observe_client_message(chunk, REMOTE_CONTROL_SEGMENT_MAX_BYTES + 1),
-            ClientSegmentObservation::Dropped
-        ));
-    }
-
-    #[test]
-    fn websocket_state_ignores_oversized_stale_chunks_without_dropping_newer_assembly() {
-        let (outbound_buffer, _used_rx) = BoundedOutboundBuffer::new();
-        let mut state = WebsocketState {
-            outbound_buffer,
-            subscribe_cursor: None,
-            next_seq_id_by_stream: HashMap::new(),
-            last_completed_client_chunk_seq_id_by_stream: HashMap::new(),
-            client_segment_reassembler: ClientSegmentReassembler::default(),
-        };
-        let message = JSONRPCMessage::Notification(JSONRPCNotification {
-            method: "initialized".to_string(),
-            params: None,
-        });
-        let raw = serde_json::to_vec(&message).expect("message should serialize");
-        let split = raw.len() / 2;
-        let first_newer_chunk = client_chunk_envelope(
-            "client-1",
-            "stream-1",
-            /*seq_id*/ 8,
-            /*segment_id*/ 0,
-            /*segment_count*/ 2,
-            raw.len(),
-            &raw[..split],
-        );
-        let oversized_stale_chunk = client_chunk_envelope(
-            "client-1",
-            "stream-1",
-            /*seq_id*/ 7,
-            /*segment_id*/ 0,
-            /*segment_count*/ 2,
-            raw.len(),
-            &raw[..split],
-        );
-        let second_newer_chunk = client_chunk_envelope(
-            "client-1",
-            "stream-1",
-            /*seq_id*/ 8,
-            /*segment_id*/ 1,
-            /*segment_count*/ 2,
-            raw.len(),
-            &raw[split..],
-        );
-
-        assert!(matches!(
-            observe_client_message(&mut state, first_newer_chunk),
-            ClientSegmentObservation::Pending
-        ));
-        assert!(matches!(
-            state.observe_client_message(
-                oversized_stale_chunk,
-                REMOTE_CONTROL_SEGMENT_MAX_BYTES + 1,
-            ),
-            ClientSegmentObservation::Dropped
-        ));
-        assert!(matches!(
-            observe_client_message(&mut state, second_newer_chunk),
-            ClientSegmentObservation::Forward(_)
-        ));
-    }
-
-    #[test]
-    fn websocket_state_ignores_oversized_duplicate_chunks_without_dropping_current_assembly() {
-        let (outbound_buffer, _used_rx) = BoundedOutboundBuffer::new();
-        let mut state = WebsocketState {
-            outbound_buffer,
-            subscribe_cursor: None,
-            next_seq_id_by_stream: HashMap::new(),
-            last_completed_client_chunk_seq_id_by_stream: HashMap::new(),
-            client_segment_reassembler: ClientSegmentReassembler::default(),
-        };
-        let message = JSONRPCMessage::Notification(JSONRPCNotification {
-            method: "initialized".to_string(),
-            params: None,
-        });
-        let raw = serde_json::to_vec(&message).expect("message should serialize");
-        let split = raw.len() / 2;
-        let first_chunk = client_chunk_envelope(
-            "client-1",
-            "stream-1",
-            /*seq_id*/ 8,
-            /*segment_id*/ 0,
-            /*segment_count*/ 2,
-            raw.len(),
-            &raw[..split],
-        );
-        let oversized_duplicate_chunk = client_chunk_envelope(
-            "client-1",
-            "stream-1",
-            /*seq_id*/ 8,
-            /*segment_id*/ 0,
-            /*segment_count*/ 2,
-            raw.len(),
-            &raw[..split],
-        );
-        let second_chunk = client_chunk_envelope(
-            "client-1",
-            "stream-1",
-            /*seq_id*/ 8,
-            /*segment_id*/ 1,
-            /*segment_count*/ 2,
-            raw.len(),
-            &raw[split..],
-        );
-
-        assert!(matches!(
-            observe_client_message(&mut state, first_chunk),
-            ClientSegmentObservation::Pending
-        ));
-        assert!(matches!(
-            state.observe_client_message(
-                oversized_duplicate_chunk,
-                REMOTE_CONTROL_SEGMENT_MAX_BYTES + 1,
-            ),
-            ClientSegmentObservation::Dropped
-        ));
-        assert!(matches!(
-            observe_client_message(&mut state, second_chunk),
-            ClientSegmentObservation::Forward(_)
-        ));
-    }
-
-    #[test]
-    fn websocket_state_clears_chunk_cursor_when_stream_is_invalidated() {
-        let (outbound_buffer, _used_rx) = BoundedOutboundBuffer::new();
-        let mut state = WebsocketState {
-            outbound_buffer,
-            subscribe_cursor: None,
-            next_seq_id_by_stream: HashMap::new(),
-            last_completed_client_chunk_seq_id_by_stream: HashMap::new(),
-            client_segment_reassembler: ClientSegmentReassembler::default(),
-        };
-        let client_id = ClientId("client-1".to_string());
-        let stream_id = StreamId("stream-1".to_string());
-
-        assert!(matches!(
-            observe_client_message(
-                &mut state,
-                client_chunk_envelope(
-                    "client-1", "stream-1", /*seq_id*/ 4, /*segment_id*/ 0,
-                    /*segment_count*/ 2, /*message_size_bytes*/ 2, b"x",
-                )
-            ),
-            ClientSegmentObservation::Pending
-        ));
-        state.invalidate_client_message_stream(&client_id, &stream_id);
-        state
-            .client_segment_reassembler
-            .invalidate_stream(&client_id, &stream_id);
-
-        assert!(matches!(
-            observe_client_message(
-                &mut state,
-                client_chunk_envelope(
-                    "client-1", "stream-1", /*seq_id*/ 1, /*segment_id*/ 0,
-                    /*segment_count*/ 2, /*message_size_bytes*/ 2, b"x",
-                )
-            ),
-            ClientSegmentObservation::Pending
-        ));
     }
 
     fn server_envelope(
@@ -2415,58 +1513,6 @@ mod tests {
             stream_id: StreamId(stream_id.to_string()),
             seq_id,
         }
-    }
-
-    fn server_chunk_envelope(
-        client_id: &ClientId,
-        stream_id: &str,
-        seq_id: u64,
-        segment_id: usize,
-    ) -> ServerEnvelope {
-        ServerEnvelope {
-            event: ServerEvent::ServerMessageChunk {
-                segment_id,
-                segment_count: 2,
-                message_size_bytes: 2,
-                message_chunk_base64: String::new(),
-            },
-            client_id: client_id.clone(),
-            stream_id: StreamId(stream_id.to_string()),
-            seq_id,
-        }
-    }
-
-    fn client_chunk_envelope(
-        client_id: &str,
-        stream_id: &str,
-        seq_id: u64,
-        segment_id: usize,
-        segment_count: usize,
-        message_size_bytes: usize,
-        chunk: &[u8],
-    ) -> ClientEnvelope {
-        ClientEnvelope {
-            event: ClientEvent::ClientMessageChunk {
-                segment_id,
-                segment_count,
-                message_size_bytes,
-                message_chunk_base64: base64::engine::general_purpose::STANDARD.encode(chunk),
-            },
-            client_id: ClientId(client_id.to_string()),
-            stream_id: Some(StreamId(stream_id.to_string())),
-            seq_id: Some(seq_id),
-            cursor: None,
-        }
-    }
-
-    fn observe_client_message(
-        state: &mut WebsocketState,
-        envelope: ClientEnvelope,
-    ) -> ClientSegmentObservation {
-        let wire_size_bytes = serde_json::to_vec(&envelope)
-            .expect("client envelope should serialize")
-            .len();
-        state.observe_client_message(envelope, wire_size_bytes)
     }
 
     async fn accept_http_request(listener: &TcpListener) -> (TcpStream, String) {

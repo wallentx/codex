@@ -104,16 +104,18 @@ pub(crate) async fn run_codex_thread_interactive(
     }))
     .or_cancel(&cancel_token)
     .await??;
-    let thread_config = codex.thread_config_snapshot().await;
-    let client_metadata = parent_session.app_server_client_metadata().await;
-    emit_subagent_session_started(
-        &parent_session.services.analytics_events_client,
-        client_metadata,
-        codex.session.conversation_id,
-        Some(parent_session.conversation_id),
-        thread_config,
-        subagent_source,
-    );
+    if parent_session.enabled(codex_features::Feature::GeneralAnalytics) {
+        let thread_config = codex.thread_config_snapshot().await;
+        let client_metadata = parent_session.app_server_client_metadata().await;
+        emit_subagent_session_started(
+            &parent_session.services.analytics_events_client,
+            client_metadata,
+            codex.session.conversation_id,
+            Some(parent_session.conversation_id),
+            thread_config,
+            subagent_source,
+        );
+    }
     let codex = Arc::new(codex);
 
     // Use a child token so parent cancel cascades but we can scope it to this task
@@ -262,6 +264,11 @@ async fn forward_events(
                     Err(_) => break,
                 };
                 match event {
+                    // ignore all legacy delta events
+                    Event {
+                        id: _,
+                        msg: EventMsg::AgentMessageDelta(_) | EventMsg::AgentReasoningDelta(_),
+                    } => {}
                     Event {
                         id: _,
                         msg: EventMsg::TokenCount(_),
