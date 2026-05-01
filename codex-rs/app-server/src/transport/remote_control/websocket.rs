@@ -17,8 +17,6 @@ use super::protocol::ServerEnvelope;
 use super::protocol::StreamId;
 use axum::http::HeaderValue;
 use base64::Engine;
-use codex_app_server_protocol::RemoteControlConnectionStatus;
-use codex_app_server_protocol::RemoteControlStatusChangedNotification;
 use codex_core::util::backoff;
 use codex_login::AuthManager;
 use codex_login::UnauthorizedRecovery;
@@ -119,7 +117,6 @@ pub(crate) struct RemoteControlWebsocket {
     remote_control_target: Option<RemoteControlTarget>,
     state_db: Option<Arc<StateRuntime>>,
     auth_manager: Arc<AuthManager>,
-    status_publisher: RemoteControlStatusPublisher,
     shutdown_token: CancellationToken,
     reconnect_attempt: u64,
     enrollment: Option<RemoteControlEnrollment>,
@@ -137,82 +134,20 @@ enum ConnectOutcome {
     Shutdown,
 }
 
-pub(super) struct RemoteControlChannels {
-    pub(super) transport_event_tx: mpsc::Sender<TransportEvent>,
-    pub(super) status_publisher: RemoteControlStatusPublisher,
-}
-
-#[derive(Clone)]
-pub(super) struct RemoteControlStatusPublisher {
-    tx: watch::Sender<RemoteControlStatusChangedNotification>,
-}
-
-impl RemoteControlStatusPublisher {
-    pub(super) fn new(tx: watch::Sender<RemoteControlStatusChangedNotification>) -> Self {
-        Self { tx }
-    }
-
-    fn publish_status(&self, connection_status: RemoteControlConnectionStatus) {
-        self.tx.send_if_modified(|status| {
-            let next_status = RemoteControlStatusChangedNotification {
-                status: connection_status,
-                environment_id: if connection_status == RemoteControlConnectionStatus::Disabled {
-                    None
-                } else {
-                    status.environment_id.clone()
-                },
-            };
-            if *status == next_status {
-                return false;
-            }
-
-            *status = next_status;
-            true
-        });
-    }
-
-    fn publish_environment_id(&self, environment_id: Option<String>) {
-        self.tx.send_if_modified(|status| {
-            if status.status == RemoteControlConnectionStatus::Disabled {
-                return false;
-            }
-            let next_status = RemoteControlStatusChangedNotification {
-                status: status.status,
-                environment_id,
-            };
-            if *status == next_status {
-                return false;
-            }
-
-            *status = next_status;
-            true
-        });
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct RemoteControlConnectOptions<'a> {
-    subscribe_cursor: Option<&'a str>,
-    app_server_client_name: Option<&'a str>,
-}
-
 impl RemoteControlWebsocket {
     pub(crate) fn new(
         remote_control_url: String,
         remote_control_target: Option<RemoteControlTarget>,
         state_db: Option<Arc<StateRuntime>>,
         auth_manager: Arc<AuthManager>,
-        channels: RemoteControlChannels,
+        transport_event_tx: mpsc::Sender<TransportEvent>,
         shutdown_token: CancellationToken,
         enabled_rx: watch::Receiver<bool>,
     ) -> Self {
         let shutdown_token = shutdown_token.child_token();
         let (server_event_tx, server_event_rx) = mpsc::channel(super::CHANNEL_CAPACITY);
-        let client_tracker = ClientTracker::new(
-            server_event_tx,
-            channels.transport_event_tx,
-            &shutdown_token,
-        );
+        let client_tracker =
+            ClientTracker::new(server_event_tx, transport_event_tx, &shutdown_token);
         let (outbound_buffer, used_rx) = BoundedOutboundBuffer::new();
         let auth_recovery = auth_manager.unauthorized_recovery();
 
@@ -221,7 +156,6 @@ impl RemoteControlWebsocket {
             remote_control_target,
             state_db,
             auth_manager,
-            status_publisher: channels.status_publisher,
             shutdown_token,
             reconnect_attempt: 0,
             enrollment: None,
@@ -268,11 +202,7 @@ impl RemoteControlWebsocket {
                 .await
             {
                 ConnectOutcome::Connected(websocket_connection) => *websocket_connection,
-                ConnectOutcome::Disabled => {
-                    self.status_publisher
-                        .publish_status(RemoteControlConnectionStatus::Disabled);
-                    continue;
-                }
+                ConnectOutcome::Disabled => continue,
                 ConnectOutcome::Shutdown => break,
             };
 
@@ -313,8 +243,6 @@ impl RemoteControlWebsocket {
         shutdown_token: &CancellationToken,
         app_server_client_name: Option<&str>,
     ) -> ConnectOutcome {
-        self.status_publisher
-            .publish_status(RemoteControlConnectionStatus::Connecting);
         let remote_control_target = match self.remote_control_target.as_ref() {
             Some(remote_control_target) => remote_control_target.clone(),
             None => match super::protocol::normalize_remote_control_url(&self.remote_control_url) {
@@ -323,8 +251,6 @@ impl RemoteControlWebsocket {
                     remote_control_target
                 }
                 Err(err) => {
-                    self.status_publisher
-                        .publish_status(RemoteControlConnectionStatus::Errored);
                     warn!("remote control is enabled but the URL is invalid: {err}");
                     tokio::select! {
                         _ = shutdown_token.cancelled() => return ConnectOutcome::Shutdown,
@@ -341,10 +267,6 @@ impl RemoteControlWebsocket {
 
         loop {
             let subscribe_cursor = self.state.lock().await.subscribe_cursor.clone();
-            let connect_options = RemoteControlConnectOptions {
-                subscribe_cursor: subscribe_cursor.as_deref(),
-                app_server_client_name,
-            };
             let connect_result = tokio::select! {
                 _ = shutdown_token.cancelled() => return ConnectOutcome::Shutdown,
                 changed = self.enabled_rx.wait_for(|enabled| !*enabled) => {
@@ -359,20 +281,15 @@ impl RemoteControlWebsocket {
                     &self.auth_manager,
                     &mut self.auth_recovery,
                     &mut self.enrollment,
-                    connect_options,
-                    &self.status_publisher,
+                    subscribe_cursor.as_deref(),
+                    app_server_client_name,
                 ) => connect_result,
             };
 
             match connect_result {
                 Ok((websocket_connection, response)) => {
-                    if !*self.enabled_rx.borrow() {
-                        return ConnectOutcome::Disabled;
-                    }
                     self.reconnect_attempt = 0;
                     self.auth_recovery = self.auth_manager.unauthorized_recovery();
-                    self.status_publisher
-                        .publish_status(RemoteControlConnectionStatus::Connected);
                     info!(
                         "connected to app-server remote control websocket: {}, {}",
                         remote_control_target.websocket_url,
@@ -381,14 +298,9 @@ impl RemoteControlWebsocket {
                     return ConnectOutcome::Connected(Box::new(websocket_connection));
                 }
                 Err(err) => {
-                    if !*self.enabled_rx.borrow() {
-                        return ConnectOutcome::Disabled;
-                    }
                     let reconnect_delay = if err.kind() == ErrorKind::WouldBlock {
                         REMOTE_CONTROL_ACCOUNT_ID_RETRY_INTERVAL
                     } else {
-                        self.status_publisher
-                            .publish_status(RemoteControlConnectionStatus::Errored);
                         warn!(
                             "failed to connect to app-server remote control websocket: {}, err: {}",
                             remote_control_target.websocket_url, err
@@ -439,15 +351,9 @@ impl RemoteControlWebsocket {
         let mut enabled_rx = self.enabled_rx.clone();
         tokio::select! {
             _ = shutdown_token.cancelled() => {}
-            changed = enabled_rx.wait_for(|enabled| !*enabled) => {
-                if changed.is_ok() {
-                    self.status_publisher
-                        .publish_status(RemoteControlConnectionStatus::Disabled);
-                }
-            }
-            _ = join_set.join_next() => {}
-        };
-        shutdown_token.cancel();
+            _ = enabled_rx.wait_for(|enabled| !*enabled) => shutdown_token.cancel(),
+            _ = join_set.join_next() => shutdown_token.cancel(),
+        }
 
         join_set.join_all().await;
     }
@@ -800,7 +706,7 @@ pub(crate) async fn load_remote_control_auth(
                     "remote control requires ChatGPT authentication",
                 ));
             }
-            auth_manager.reload().await;
+            auth_manager.reload();
             reloaded = true;
             continue;
         };
@@ -808,7 +714,7 @@ pub(crate) async fn load_remote_control_auth(
             break auth;
         }
         if auth.get_account_id().is_none() && !reloaded {
-            auth_manager.reload().await;
+            auth_manager.reload();
             reloaded = true;
             continue;
         }
@@ -839,32 +745,15 @@ pub(super) async fn connect_remote_control_websocket(
     auth_manager: &Arc<AuthManager>,
     auth_recovery: &mut UnauthorizedRecovery,
     enrollment: &mut Option<RemoteControlEnrollment>,
-    connect_options: RemoteControlConnectOptions<'_>,
-    status_publisher: &RemoteControlStatusPublisher,
+    subscribe_cursor: Option<&str>,
+    app_server_client_name: Option<&str>,
 ) -> io::Result<(
     WebSocketStream<MaybeTlsStream<TcpStream>>,
     tungstenite::http::Response<()>,
 )> {
     ensure_rustls_crypto_provider();
 
-    let Some(state_db) = state_db else {
-        *enrollment = None;
-        return Err(io::Error::new(
-            ErrorKind::NotFound,
-            "remote control requires sqlite state db",
-        ));
-    };
-
-    let auth = match load_remote_control_auth(auth_manager).await {
-        Ok(auth) => auth,
-        Err(err) => {
-            if err.kind() == ErrorKind::PermissionDenied {
-                *enrollment = None;
-                status_publisher.publish_environment_id(/*environment_id*/ None);
-            }
-            return Err(err);
-        }
-    };
+    let auth = load_remote_control_auth(auth_manager).await?;
     let enrollment_account_id = enrollment.as_ref().map(|enrollment| &enrollment.account_id);
     if enrollment_account_id.is_some_and(|account_id| account_id != &auth.account_id) {
         info!(
@@ -876,25 +765,16 @@ pub(super) async fn connect_remote_control_websocket(
             auth.account_id
         );
         *enrollment = None;
-        status_publisher.publish_environment_id(/*environment_id*/ None);
-    }
-
-    if let Some(enrollment) = enrollment.as_ref() {
-        status_publisher.publish_environment_id(Some(enrollment.environment_id.clone()));
     }
 
     if enrollment.is_none() {
-        let loaded_enrollment = load_persisted_remote_control_enrollment(
-            Some(state_db),
+        *enrollment = load_persisted_remote_control_enrollment(
+            state_db,
             remote_control_target,
             &auth.account_id,
-            connect_options.app_server_client_name,
+            app_server_client_name,
         )
-        .await?;
-        if let Some(loaded_enrollment) = loaded_enrollment.as_ref() {
-            status_publisher.publish_environment_id(Some(loaded_enrollment.environment_id.clone()));
-        }
-        *enrollment = loaded_enrollment;
+        .await;
     }
 
     if enrollment.is_none() {
@@ -916,17 +796,15 @@ pub(super) async fn connect_remote_control_websocket(
             Err(err) => return Err(err),
         };
         if let Err(err) = update_persisted_remote_control_enrollment(
-            Some(state_db),
+            state_db,
             remote_control_target,
             &auth.account_id,
-            connect_options.app_server_client_name,
+            app_server_client_name,
             Some(&new_enrollment),
         )
         .await
         {
-            return Err(io::Error::other(format!(
-                "failed to persist remote control enrollment in sqlite state db: {err}"
-            )));
+            warn!("failed to persist remote control enrollment in sqlite state db: {err}");
         }
         info!(
             "created new remote control enrollment: websocket_url={}, account_id={}, server_id={}, environment_id={}",
@@ -935,7 +813,6 @@ pub(super) async fn connect_remote_control_websocket(
             new_enrollment.server_id,
             new_enrollment.environment_id
         );
-        status_publisher.publish_environment_id(Some(new_enrollment.environment_id.clone()));
         *enrollment = Some(new_enrollment);
     }
 
@@ -946,7 +823,7 @@ pub(super) async fn connect_remote_control_websocket(
         &remote_control_target.websocket_url,
         enrollment_ref,
         &auth,
-        connect_options.subscribe_cursor,
+        subscribe_cursor,
     )?;
 
     match connect_async(request).await {
@@ -962,10 +839,10 @@ pub(super) async fn connect_remote_control_websocket(
                         enrollment_ref.environment_id
                     );
                     if let Err(clear_err) = update_persisted_remote_control_enrollment(
-                        Some(state_db),
+                        state_db,
                         remote_control_target,
                         &auth.account_id,
-                        connect_options.app_server_client_name,
+                        app_server_client_name,
                         /*enrollment*/ None,
                     )
                     .await
@@ -975,7 +852,6 @@ pub(super) async fn connect_remote_control_websocket(
                         );
                     }
                     *enrollment = None;
-                    status_publisher.publish_environment_id(/*environment_id*/ None);
                 }
                 tungstenite::Error::Http(response)
                     if matches!(response.status().as_u16(), 401 | 403) =>
@@ -1082,17 +958,6 @@ mod tests {
     #[cfg(not(windows))]
     const TEST_HTTP_ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
 
-    fn remote_control_status_channel() -> (
-        RemoteControlStatusPublisher,
-        watch::Receiver<RemoteControlStatusChangedNotification>,
-    ) {
-        let (status_tx, status_rx) = watch::channel(RemoteControlStatusChangedNotification {
-            status: RemoteControlConnectionStatus::Connecting,
-            environment_id: None,
-        });
-        (RemoteControlStatusPublisher::new(status_tx), status_rx)
-    }
-
     async fn remote_control_state_runtime(codex_home: &TempDir) -> Arc<StateRuntime> {
         StateRuntime::init(codex_home.path().to_path_buf(), "test-provider".to_string())
             .await
@@ -1184,7 +1049,6 @@ mod tests {
             server_id: "srv_e_test".to_string(),
             server_name: "test-server".to_string(),
         });
-        let (status_publisher, status_rx) = remote_control_status_channel();
 
         let err = match connect_remote_control_websocket(
             &remote_control_target,
@@ -1192,11 +1056,8 @@ mod tests {
             &auth_manager,
             &mut auth_recovery,
             &mut enrollment,
-            RemoteControlConnectOptions {
-                subscribe_cursor: None,
-                app_server_client_name: None,
-            },
-            &status_publisher,
+            /*subscribe_cursor*/ None,
+            /*app_server_client_name*/ None,
         )
         .await
         {
@@ -1206,13 +1067,6 @@ mod tests {
 
         server_task.await.expect("server task should succeed");
         assert_eq!(err.to_string(), expected_error);
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Connecting,
-                environment_id: Some("env_test".to_string()),
-            }
-        );
     }
 
     #[tokio::test]
@@ -1236,8 +1090,7 @@ mod tests {
             /*enable_codex_api_key_env*/ false,
             AuthCredentialsStoreMode::File,
             /*chatgpt_base_url*/ None,
-        )
-        .await;
+        );
         let mut auth_recovery = auth_manager.unauthorized_recovery();
         let mut enrollment = Some(RemoteControlEnrollment {
             account_id: "account_id".to_string(),
@@ -1245,7 +1098,6 @@ mod tests {
             server_id: "srv_e_test".to_string(),
             server_name: "test-server".to_string(),
         });
-        let (status_publisher, status_rx) = remote_control_status_channel();
         save_auth(
             codex_home.path(),
             &remote_control_auth_dot_json("fresh-token"),
@@ -1268,23 +1120,13 @@ mod tests {
             &auth_manager,
             &mut auth_recovery,
             &mut enrollment,
-            RemoteControlConnectOptions {
-                subscribe_cursor: None,
-                app_server_client_name: None,
-            },
-            &status_publisher,
+            /*subscribe_cursor*/ None,
+            /*app_server_client_name*/ None,
         )
         .await
         .expect_err("unauthorized response should fail the websocket connect");
 
         server_task.await.expect("server task should succeed");
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Connecting,
-                environment_id: Some("env_test".to_string()),
-            }
-        );
         assert_eq!(
             err.to_string(),
             "remote control websocket auth failed with HTTP 401 Unauthorized; retrying after auth recovery"
@@ -1330,11 +1172,9 @@ mod tests {
             /*enable_codex_api_key_env*/ false,
             AuthCredentialsStoreMode::File,
             /*chatgpt_base_url*/ None,
-        )
-        .await;
+        );
         let mut auth_recovery = auth_manager.unauthorized_recovery();
         let mut enrollment = None;
-        let (status_publisher, status_rx) = remote_control_status_channel();
         save_auth(
             codex_home.path(),
             &remote_control_auth_dot_json("fresh-token"),
@@ -1348,21 +1188,13 @@ mod tests {
             &auth_manager,
             &mut auth_recovery,
             &mut enrollment,
-            RemoteControlConnectOptions {
-                subscribe_cursor: None,
-                app_server_client_name: None,
-            },
-            &status_publisher,
+            /*subscribe_cursor*/ None,
+            /*app_server_client_name*/ None,
         )
         .await
         .expect_err("unauthorized enrollment should fail the websocket connect");
 
         server_task.await.expect("server task should succeed");
-        assert!(
-            !status_rx
-                .has_changed()
-                .expect("remote control status watch should remain open")
-        );
         assert_eq!(
             err.to_string(),
             format!(
@@ -1381,97 +1213,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_remote_control_websocket_requires_sqlite_state_db() {
-        let remote_control_target = normalize_remote_control_url("http://127.0.0.1:9/backend-api/")
-            .expect("target should parse");
-        let auth_manager = remote_control_auth_manager();
-        let mut auth_recovery = auth_manager.unauthorized_recovery();
-        let mut enrollment = Some(RemoteControlEnrollment {
-            account_id: "account_id".to_string(),
-            environment_id: "env_test".to_string(),
-            server_id: "srv_e_test".to_string(),
-            server_name: "test-server".to_string(),
-        });
-        let (status_publisher, _status_rx) = remote_control_status_channel();
-
-        let err = connect_remote_control_websocket(
-            &remote_control_target,
-            /*state_db*/ None,
-            &auth_manager,
-            &mut auth_recovery,
-            &mut enrollment,
-            RemoteControlConnectOptions {
-                subscribe_cursor: None,
-                app_server_client_name: None,
-            },
-            &status_publisher,
-        )
-        .await
-        .expect_err("missing sqlite state db should fail remote control");
-
-        assert_eq!(err.kind(), ErrorKind::NotFound);
-        assert_eq!(err.to_string(), "remote control requires sqlite state db");
-        assert_eq!(enrollment, None);
-    }
-
-    #[tokio::test]
-    async fn connect_remote_control_websocket_requires_chatgpt_auth() {
-        let remote_control_target = normalize_remote_control_url("http://127.0.0.1:9/backend-api/")
-            .expect("target should parse");
-        let codex_home = TempDir::new().expect("temp dir should create");
-        let state_db = remote_control_state_runtime(&codex_home).await;
-        let auth_manager = AuthManager::shared(
-            codex_home.path().to_path_buf(),
-            /*enable_codex_api_key_env*/ false,
-            AuthCredentialsStoreMode::File,
-            /*chatgpt_base_url*/ None,
-        )
-        .await;
-        let mut auth_recovery = auth_manager.unauthorized_recovery();
-        let mut enrollment = Some(RemoteControlEnrollment {
-            account_id: "account_id".to_string(),
-            environment_id: "env_test".to_string(),
-            server_id: "srv_e_test".to_string(),
-            server_name: "test-server".to_string(),
-        });
-        let (status_publisher, mut status_rx) = remote_control_status_channel();
-        status_publisher.publish_environment_id(Some("env_test".to_string()));
-        status_rx
-            .changed()
-            .await
-            .expect("remote control status watch should remain open");
-
-        let err = connect_remote_control_websocket(
-            &remote_control_target,
-            Some(state_db.as_ref()),
-            &auth_manager,
-            &mut auth_recovery,
-            &mut enrollment,
-            RemoteControlConnectOptions {
-                subscribe_cursor: None,
-                app_server_client_name: None,
-            },
-            &status_publisher,
-        )
-        .await
-        .expect_err("missing auth should fail remote control");
-
-        assert_eq!(err.kind(), ErrorKind::PermissionDenied);
-        assert_eq!(
-            err.to_string(),
-            "remote control requires ChatGPT authentication"
-        );
-        assert_eq!(enrollment, None);
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Connecting,
-                environment_id: None,
-            }
-        );
-    }
-
-    #[tokio::test]
     async fn run_remote_control_websocket_loop_shutdown_cancels_reconnect_backoff() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1483,7 +1224,6 @@ mod tests {
             normalize_remote_control_url(&remote_control_url).expect("target should parse");
         let (transport_event_tx, transport_event_rx) = mpsc::channel(1);
         drop(transport_event_rx);
-        let (status_publisher, _status_rx) = remote_control_status_channel();
         let shutdown_token = CancellationToken::new();
         let (_enabled_tx, enabled_rx) = watch::channel(true);
         let websocket_task = tokio::spawn({
@@ -1494,10 +1234,7 @@ mod tests {
                     Some(remote_control_target),
                     /*state_db*/ None,
                     remote_control_auth_manager(),
-                    RemoteControlChannels {
-                        transport_event_tx,
-                        status_publisher,
-                    },
+                    transport_event_tx,
                     shutdown_token,
                     enabled_rx,
                 )
@@ -1513,85 +1250,6 @@ mod tests {
             .await
             .expect("shutdown should cancel reconnect backoff")
             .expect("websocket task should join");
-    }
-
-    #[tokio::test]
-    async fn publish_status_if_changed_sends_only_status_changes() {
-        let (status_publisher, mut status_rx) = remote_control_status_channel();
-
-        status_publisher.publish_environment_id(/*environment_id*/ None);
-        assert!(
-            timeout(Duration::from_millis(20), status_rx.changed())
-                .await
-                .is_err()
-        );
-
-        status_publisher.publish_environment_id(Some("env_first".to_string()));
-        status_rx
-            .changed()
-            .await
-            .expect("remote control status watch should remain open");
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Connecting,
-                environment_id: Some("env_first".to_string()),
-            }
-        );
-
-        status_publisher.publish_environment_id(Some("env_first".to_string()));
-        assert!(
-            timeout(Duration::from_millis(20), status_rx.changed())
-                .await
-                .is_err()
-        );
-
-        status_publisher.publish_status(RemoteControlConnectionStatus::Connected);
-        status_rx
-            .changed()
-            .await
-            .expect("remote control status watch should remain open");
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Connected,
-                environment_id: Some("env_first".to_string()),
-            }
-        );
-
-        status_publisher.publish_environment_id(/*environment_id*/ None);
-        status_rx
-            .changed()
-            .await
-            .expect("remote control status watch should remain open");
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Connected,
-                environment_id: None,
-            }
-        );
-
-        status_publisher.publish_environment_id(Some("env_disabled".to_string()));
-        status_publisher.publish_status(RemoteControlConnectionStatus::Disabled);
-        status_rx
-            .changed()
-            .await
-            .expect("remote control status watch should remain open");
-        assert_eq!(
-            status_rx.borrow().clone(),
-            RemoteControlStatusChangedNotification {
-                status: RemoteControlConnectionStatus::Disabled,
-                environment_id: None,
-            }
-        );
-
-        status_publisher.publish_environment_id(Some("env_disabled".to_string()));
-        assert!(
-            timeout(Duration::from_millis(20), status_rx.changed())
-                .await
-                .is_err()
-        );
     }
 
     #[tokio::test]

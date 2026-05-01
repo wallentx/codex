@@ -331,19 +331,20 @@ mod tests {
 
     #[test]
     fn git_branch_global_options_respect_safety_rules() {
-        assert!(is_known_safe_command(&vec_str(&[
-            "git",
-            "branch",
-            "--show-current",
-        ])));
-        assert!(!is_known_safe_command(&vec_str(&[
-            "git", "branch", "-d", "feature",
-        ])));
-        assert!(!is_known_safe_command(&vec_str(&[
-            "bash",
-            "-lc",
-            "git branch -d feature",
-        ])));
+        use pretty_assertions::assert_eq;
+
+        assert_eq!(
+            is_known_safe_command(&vec_str(&["git", "-C", ".", "branch", "--show-current"])),
+            true
+        );
+        assert_eq!(
+            is_known_safe_command(&vec_str(&["git", "-C", ".", "branch", "-d", "feature"])),
+            false
+        );
+        assert_eq!(
+            is_known_safe_command(&vec_str(&["bash", "-lc", "git -C . branch -d feature",])),
+            false
+        );
     }
 
     #[test]
@@ -381,10 +382,6 @@ mod tests {
     #[test]
     fn git_global_override_flags_are_not_safe() {
         assert!(!is_known_safe_command(&vec_str(&[
-            "git", "-C", ".", "status",
-        ])));
-        assert!(!is_known_safe_command(&vec_str(&["git", "-C.", "status",])));
-        assert!(!is_known_safe_command(&vec_str(&[
             "git",
             "-c",
             "core.pager=cat",
@@ -418,11 +415,6 @@ mod tests {
             );
         }
 
-        assert!(!is_known_safe_command(&vec_str(&[
-            "bash",
-            "-lc",
-            "git -C .project-deps/test-fixtures status",
-        ])));
         assert!(!is_known_safe_command(&vec_str(&[
             "bash",
             "-lc",

@@ -110,7 +110,6 @@ async fn start_review_conversation(
     }
     let _ = sub_agent_config.features.disable(Feature::SpawnCsv);
     let _ = sub_agent_config.features.disable(Feature::Collab);
-    let _ = sub_agent_config.features.disable(Feature::MultiAgentV2);
 
     // Set explicit review rubric for the sub-agent
     sub_agent_config.base_instructions = Some(crate::REVIEW_PROMPT.to_string());
@@ -250,6 +249,7 @@ pub(crate) async fn exit_review_mode(
                 id: Some(REVIEW_USER_MESSAGE_ID.to_string()),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText { text: user_message }],
+                end_turn: None,
                 phase: None,
             }],
         )
@@ -270,6 +270,7 @@ pub(crate) async fn exit_review_mode(
                 content: vec![ContentItem::OutputText {
                     text: assistant_message,
                 }],
+                end_turn: None,
                 phase: None,
             },
         )

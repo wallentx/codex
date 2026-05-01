@@ -37,6 +37,7 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {
         | ResponseItem::CustomToolCallOutput { .. }
         | ResponseItem::WebSearchCall { .. }
         | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::GhostSnapshot { .. }
         | ResponseItem::Compaction { .. } => true,
         ResponseItem::Other => false,
     }
@@ -57,6 +58,7 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
         | ResponseItem::WebSearchCall { .. } => true,
         ResponseItem::Reasoning { .. }
         | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::GhostSnapshot { .. }
         | ResponseItem::Compaction { .. }
         | ResponseItem::Other => false,
     }
@@ -94,7 +96,6 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
         | EventMsg::AgentMessage(_)
         | EventMsg::AgentReasoning(_)
         | EventMsg::AgentReasoningRawContent(_)
-        | EventMsg::PatchApplyEnd(_)
         | EventMsg::TokenCount(_)
         | EventMsg::ThreadNameUpdated(_)
         | EventMsg::ContextCompacted(_)
@@ -120,6 +121,7 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
         | EventMsg::GuardianAssessment(_)
         | EventMsg::WebSearchEnd(_)
         | EventMsg::ExecCommandEnd(_)
+        | EventMsg::PatchApplyEnd(_)
         | EventMsg::McpToolCallEnd(_)
         | EventMsg::ViewImageToolCall(_)
         | EventMsg::CollabAgentSpawnEnd(_)
@@ -143,7 +145,6 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
         | EventMsg::AgentReasoningSectionBreak(_)
         | EventMsg::RawResponseItem(_)
         | EventMsg::SessionConfigured(_)
-        | EventMsg::ThreadGoalUpdated(_)
         | EventMsg::McpToolCallBegin(_)
         | EventMsg::WebSearchBegin(_)
         | EventMsg::ExecCommandBegin(_)
@@ -183,5 +184,44 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
         | EventMsg::CollabCloseBegin(_)
         | EventMsg::CollabResumeBegin(_)
         | EventMsg::ImageGenerationBegin(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventPersistenceMode;
+    use super::should_persist_event_msg;
+    use codex_protocol::ThreadId;
+    use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::ImageGenerationEndEvent;
+    use codex_protocol::protocol::ThreadNameUpdatedEvent;
+
+    #[test]
+    fn persists_image_generation_end_events_in_limited_mode() {
+        let event = EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
+            call_id: "ig_123".into(),
+            status: "completed".into(),
+            revised_prompt: Some("final prompt".into()),
+            result: "Zm9v".into(),
+            saved_path: None,
+        });
+
+        assert!(should_persist_event_msg(
+            &event,
+            EventPersistenceMode::Limited
+        ));
+    }
+
+    #[test]
+    fn persists_thread_name_updates_in_limited_mode() {
+        let event = EventMsg::ThreadNameUpdated(ThreadNameUpdatedEvent {
+            thread_id: ThreadId::new(),
+            thread_name: Some("saved-session".to_string()),
+        });
+
+        assert!(should_persist_event_msg(
+            &event,
+            EventPersistenceMode::Limited
+        ));
     }
 }
