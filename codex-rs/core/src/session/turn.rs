@@ -1875,8 +1875,7 @@ async fn try_run_sampling_request(
         auth_mode = sess.services.auth_manager.auth_mode(),
         features = sess.features.enabled_features(),
     );
-    let inference_trace = sess.services.rollout_trace.inference_trace_context(
-        sess.conversation_id,
+    let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(
         turn_context.sub_id.as_str(),
         turn_context.model_info.slug.as_str(),
         turn_context.provider.info().name.as_str(),
@@ -2132,6 +2131,7 @@ async fn try_run_sampling_request(
             ResponseEvent::Completed {
                 response_id: _,
                 token_usage,
+                end_turn,
             } => {
                 flush_assistant_text_segments_all(
                     &sess,
@@ -2143,7 +2143,9 @@ async fn try_run_sampling_request(
                 sess.update_token_usage_info(&turn_context, token_usage.as_ref())
                     .await;
                 should_emit_turn_diff = true;
-
+                if let Some(false) = end_turn {
+                    needs_follow_up = true;
+                }
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
